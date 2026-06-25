@@ -21,8 +21,9 @@ let state = {
   filtered: [],
   searchIndex: null,    // [[id, normTitle, cat, discount, chain], ...] — whole city
   catCache: {},         // {cat: {list, byId}} — full category products, lazy
-  matchRows: null,      // rows matching the active query (pre chain-filter)
-  searchToken: 0,       // guards against out-of-order async search renders
+  matchRows: null,      // index rows feeding the grid (feed/search), pre chain-filter
+  rowMode: false,       // grid driven by city-wide index rows vs a single category
+  searchToken: 0,       // guards against out-of-order async index renders
   userLat: null,
   userLng: null,
   geoSorted: false,
@@ -137,19 +138,27 @@ $('city-btn').addEventListener('click', (e) => {
   toggleCityDD();
 });
 
-// ---- Chains ----
+// ---- View modes ----
+// searchActive: a query of >= 2 chars → city-wide search.
+// rowMode: the grid is driven by the city-wide index rows (feed OR search), as
+// opposed to a single loaded category. inFeed: city chosen, no category, no
+// search → "top discounts city-wide".
 function searchActive() {
   return normSearch(state.search).length >= SEARCH_MIN_CHARS;
 }
+function inFeed() {
+  return !!state.city && !state.category && !searchActive();
+}
 
+// ---- Chains ----
 function getChainCounts() {
   // Counts reflect the active filter so each tab shows how many matching
-  // products that chain has. In search mode the source is the city-wide match
-  // set; otherwise it's the loaded category (optionally narrowed by a short,
-  // sub-threshold query). Every chain present stays listed so the active tab
-  // never disappears mid-search.
+  // products that chain has. In row mode (feed/search) the source is the
+  // city-wide match set; otherwise it's the loaded category (optionally
+  // narrowed by a short, sub-threshold query). Every chain present stays
+  // listed so the active tab never disappears mid-filter.
   const counts = {};
-  if (searchActive()) {
+  if (state.rowMode) {
     for (const r of (state.matchRows || [])) counts[r[4]] = (counts[r[4]] || 0) + 1;
     return counts;
   }
@@ -164,7 +173,7 @@ function getChainCounts() {
 
 function renderChains() {
   const el = $('store-tabs');
-  const hasData = searchActive() ? (state.matchRows && state.matchRows.length) : state.products.length;
+  const hasData = state.rowMode ? (state.matchRows && state.matchRows.length) : state.products.length;
   if (!hasData) { el.innerHTML = ''; return; }
   const counts = getChainCounts();
   const chains = Object.keys(counts).sort((a, b) => counts[b] - counts[a]);
@@ -183,12 +192,8 @@ function renderChains() {
       state.subcategory = null;
       state.offset = 0;
       renderChains();
-      if (searchActive()) {
-        runSearch();
-      } else {
-        renderStoreFilter();
-        applyFilters();
-      }
+      renderStoreFilter();
+      refreshView();
     };
   });
 }
@@ -582,8 +587,7 @@ function renderSubcatList(dd) {
     state.offset = 0;
     closeCatDD();
     renderCategories();
-    renderChains();
-    renderProducts();
+    refreshView();   // → top-discounts feed
   };
 
   dd.querySelector('.cat-option').onclick = () => {
@@ -641,7 +645,7 @@ function renderProduct(p) {
   if (p.d) priceHtml += `<span class="discount-badge">-${p.d}%</span>`;
 
   let meta = `<span class="chain-badge ${p.ch}">${chainLabel}</span>`;
-  if (p.sc >= 1) meta += `<span class="store-count-badge" data-pid="${p.id}">${p.sc} маг.</span>`;
+  if (p.sc >= 1) meta += `<span class="store-count-badge" data-pid="${p.id}">${p.sc} маг. ▾</span>`;
   if (p.end) meta += `<span class="promo-date">до ${formatPromoEnd(p.end)}</span>`;
 
   return `
@@ -663,6 +667,21 @@ function bindCardEvents(container) {
   container.querySelectorAll('.product-card[data-url]').forEach(card => {
     card.onclick = () => tg.openLink(card.dataset.url);
   });
+}
+
+// Skeleton placeholders shown in the grid while a product load is in flight.
+// Mirrors the real card layout (80x80 image + two text lines) so the swap to
+// real cards doesn't shift the layout.
+function renderSkeleton(n) {
+  const card = `
+    <div class="skeleton-card">
+      <div class="skeleton-img"></div>
+      <div class="skeleton-info">
+        <div class="skeleton-line"></div>
+        <div class="skeleton-line short"></div>
+      </div>
+    </div>`;
+  $('products-grid').innerHTML = card.repeat(n);
 }
 
 function renderProducts() {
@@ -779,36 +798,48 @@ async function loadCityData() {
   state.matchRows = null;
   $('result-count').style.display = 'none';
 
+  $('welcome').style.display = 'none';
   $('loading').style.display = 'flex';
   state.index = await fetchJSON(`${encodeURIComponent(state.city)}/index.json`);
-  renderCategories();
-  renderStoreFilter();
-
   state.products = [];
   state.filtered = [];
-  renderChains();
-  renderProducts();
+  refreshView();   // city chosen, no category → top-discounts feed
 }
 
-// ---- Search (city-wide, across categories) ----
-async function runSearch() {
+// Dispatch to the right view: city-wide search (query ≥ 2 chars), the
+// top-discounts feed (city chosen, no category), or a single open category.
+function refreshView() {
+  if (searchActive()) return runIndexView('search');
+  if (inFeed()) return runIndexView('feed');
+  renderCategories();
+  renderStoreFilter();
+  applyFilters();
+}
+
+// ---- City-wide views (feed + search), both driven by the compact index ----
+async function runIndexView(kind) {
   const token = ++state.searchToken;
-  $('loading').style.display = 'flex';
-  $('products-grid').innerHTML = '';
+  state.rowMode = true;
+  renderSkeleton(6);
   $('empty-state').style.display = 'none';
 
   const ok = await ensureSearchIndex();
-  if (token !== state.searchToken) return;  // a newer keystroke superseded us
+  if (token !== state.searchToken) return;  // a newer keystroke/click superseded us
 
-  const nq = normSearch(state.search);
-  const matched = ok ? state.searchIndex.filter(r => r[1].includes(nq)) : [];
-  state.matchRows = matched;
+  let candidates;
+  if (kind === 'search') {
+    const nq = normSearch(state.search);
+    candidates = ok ? state.searchIndex.filter(r => r[1].includes(nq)) : [];
+  } else {
+    candidates = ok ? state.searchIndex : [];
+  }
+  state.matchRows = candidates;
 
   renderChains();
   renderCategories();
   renderStoreFilter();
 
-  let rows = state.chain ? matched.filter(r => r[4] === state.chain) : matched;
+  let rows = state.chain ? candidates.filter(r => r[4] === state.chain) : candidates;
   rows = rows.slice().sort((a, b) => (b[3] || 0) - (a[3] || 0));
   const top = rows.slice(0, SEARCH_CAP);
 
@@ -826,26 +857,21 @@ async function runSearch() {
   state.offset = 0;
 
   $('loading').style.display = 'none';
-  renderResultCount(rows.length, top.length);
+  renderRowCount(kind, rows.length, top.length);
   renderProducts();
 }
 
-function renderResultCount(total, shown) {
+function renderRowCount(kind, total, shown) {
   const el = $('result-count');
-  if (!searchActive() || total === 0) { el.style.display = 'none'; return; }
+  if (total === 0) { el.style.display = 'none'; return; }
   el.style.display = 'block';
-  el.innerHTML = total > shown
-    ? `Знайдено <b>${total}</b> по всьому місту — показано ${shown} з найбільшими знижками. Уточніть запит, щоб звузити.`
-    : `Знайдено <b>${total}</b> по всьому місту`;
-}
-
-function exitSearchMode() {
-  state.matchRows = null;
-  $('result-count').style.display = 'none';
-  renderCategories();
-  renderChains();
-  renderStoreFilter();
-  applyFilters();
+  if (kind === 'search') {
+    el.innerHTML = total > shown
+      ? `Знайдено <b>${total}</b> по всьому місту — показано ${shown} з найбільшими знижками. Уточніть запит, щоб звузити.`
+      : `Знайдено <b>${total}</b> по всьому місту`;
+  } else {
+    el.innerHTML = `🔥 Найбільші знижки${state.chain ? '' : ' по всьому місту'} — показано ${shown}`;
+  }
 }
 
 async function loadCategoryProducts() {
@@ -853,13 +879,11 @@ async function loadCategoryProducts() {
     state.products = [];
     state.storeProductIds = null;
     state.subcategory = null;
-    renderChains();
-    applyFilters();
+    refreshView();   // "Всі категорії" → back to the top-discounts feed
     return;
   }
 
-  $('loading').style.display = 'flex';
-  $('products-grid').innerHTML = '';
+  renderSkeleton(6);
   state.storeProductIds = null;
   state.subcategory = null;
 
@@ -874,9 +898,14 @@ async function loadCategoryProducts() {
   }
 }
 
-// Category-mode filtering over the open category. City-wide search goes through
-// runSearch() instead; this only handles a leftover short (sub-threshold) query.
+// Category-mode filtering over the open category. City-wide views (feed/search)
+// go through runIndexView() instead; the search clause here only handles a
+// leftover short (sub-threshold) query while a category is open.
 function applyFilters() {
+  state.rowMode = false;
+  state.matchRows = null;
+  $('result-count').style.display = 'none';
+  renderChains();
   let items = state.products;
 
   if (state.chain) {
@@ -909,17 +938,9 @@ $('search-input').addEventListener('input', (e) => {
   clearTimeout(searchTimeout);
   const val = e.target.value.trim();
   searchTimeout = setTimeout(() => {
-    const wasSearching = !!state.matchRows;
     state.search = val;
     state.offset = 0;
-    if (searchActive()) {
-      runSearch();
-    } else if (wasSearching) {
-      exitSearchMode();   // query cleared/shortened → back to category browsing
-    } else {
-      renderChains();
-      applyFilters();
-    }
+    refreshView();   // search / feed / category, per current state
   }, 200);
 });
 
@@ -930,6 +951,8 @@ $('load-more-btn').addEventListener('click', () => appendProducts());
   await loadCities();
   if (state.city) {
     await loadCityData();
+  } else {
+    $('welcome').style.display = 'flex';
   }
   detectCityByGeo();  // float the user's city to the top (and select it if none chosen)
 })();

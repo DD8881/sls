@@ -89,6 +89,9 @@ OUTPUT_DIR = os.path.join(os.path.dirname(__file__), "data")
 
 CITY_WORKERS = 6
 
+# curated food-first category order (index per slug, unknown slugs fall to end)
+_UNIFIED_ORDER = {slug: i for i, (slug, _t) in enumerate(UNIFIED)}
+
 
 def write_json(path, data):
     os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -164,6 +167,11 @@ def _generate_city(city, city_store_list, products, sp_by_store, slug_to_title):
 
         best_price = min(sp["price"] for sp in sp_list)
         max_discount = max((sp["discount_pct"] or 0) for sp in sp_list)
+        # Drop corrupt rows: a non-positive price or a discount of 100%+ means a
+        # bad scrape (price 0, or a sentinel old_price like 99999999). These would
+        # otherwise top the discount-sorted feed.
+        if best_price <= 0 or max_discount >= 100:
+            continue
         old_price = next((sp["old_price"] for sp in sp_list if sp.get("old_price")), None)
         promo_end = next((sp["promo_end_date"] for sp in sp_list if sp.get("promo_end_date")), None)
         sub = slug_to_title.get((p["chain"], p.get("category_slug") or ""), "")
@@ -204,7 +212,7 @@ def _generate_city(city, city_store_list, products, sp_by_store, slug_to_title):
             "title": UNIFIED_DICT.get(ucat, ucat),
             "cnt": len(items),
         })
-    categories.sort(key=lambda x: -x["cnt"])
+    categories.sort(key=lambda x: (_UNIFIED_ORDER.get(x["slug"], len(UNIFIED)), -x["cnt"]))
 
     write_json(os.path.join(city_dir, "index.json"), {
         "city": city,
