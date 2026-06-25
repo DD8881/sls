@@ -79,6 +79,7 @@ function renderCityDropdown() {
     opt.onclick = () => {
       state.city = opt.dataset.city;
       localStorage.setItem('sls_city', state.city);
+      localStorage.setItem('sls_city_manual', '1');  // explicit pick → geo won't override
       closeCityDD();
       renderCityBtn();
       loadCityData();
@@ -242,7 +243,9 @@ function detectCityByGeo() {
     if (!best || bestD > GEO_CITY_MAX_KM) return;
     state.geoCity = best;
     if (cityOpen) renderCityDropdown();
-    if (!state.city) {  // nothing chosen yet → default to the user's city
+    // Default to the geolocated city unless the user picked one manually.
+    const manual = localStorage.getItem('sls_city_manual');
+    if (!manual && state.city !== best) {
       state.city = best;
       localStorage.setItem('sls_city', state.city);
       renderCityBtn();
