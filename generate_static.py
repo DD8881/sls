@@ -31,6 +31,38 @@ log = logging.getLogger(__name__)
 # Units that are just a count/packaging label, not a volume/weight worth showing.
 _COUNT_UNITS = {"шт", "шт.", "уп", "уп.", "пак", "пак.", "компл", "компл."}
 
+# Latin→Cyrillic homoglyph folding for the search index. Scraped titles often
+# carry a Latin letter inside a Cyrillic word ("Хрiн" with a Latin "i"); folding
+# the indexed title lets a Cyrillic query match it. Keep this in sync with
+# normSearch() in webapp/app.js.
+_HOMOGLYPHS = str.maketrans({
+    "a": "а", "c": "с", "e": "е", "i": "і", "o": "о", "p": "р", "x": "х", "y": "у",
+})
+
+
+def _norm_search(s: str) -> str:
+    return (s or "").lower().translate(_HOMOGLYPHS)
+
+
+def _search_rows(cat_products):
+    """Compact city-wide search index: one row per product across all categories.
+
+    Row = [id, normalized_title, category_slug, discount, chain] — just enough
+    for the client to match a query, sort by discount and filter by chain, then
+    lazy-load the matched category file to render full cards.
+    """
+    rows = []
+    for ucat, items in cat_products.items():
+        for item, _ in items:
+            rows.append([
+                item["id"],
+                _norm_search(item["t"]),
+                ucat,
+                item.get("d", 0) or 0,
+                item["ch"],
+            ])
+    return rows
+
 
 def _norm_unit(s: str) -> str:
     return s.lower().replace(",", ".").replace(" ", "")
@@ -215,6 +247,8 @@ def _generate_city(city, city_store_list, products, sp_by_store, slug_to_title):
         )
 
         total_products += len(products_compact)
+
+    write_json(os.path.join(city_dir, "search.json"), {"i": _search_rows(cat_products)})
 
     log.info("Generated %s/: %d products, %d stores", city, total_products, len(stores_map))
     return city, total_products
