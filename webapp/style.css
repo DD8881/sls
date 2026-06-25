@@ -118,6 +118,16 @@ body {
 .city-option.active { color: var(--button); font-weight: 600; }
 .city-count { font-size: 12px; color: var(--hint); }
 
+.city-geo-row {
+  position: sticky;
+  top: 0;
+  padding: 8px 10px;
+  background: var(--section-bg);
+  border-bottom: 1px solid var(--secondary-bg);
+  z-index: 1;
+}
+.city-geo-row .geo-sort-btn { width: 100%; padding: 8px 10px; font-size: 13px; }
+
 /* Store tabs */
 .store-tabs {
   display: flex;

@@ -66,7 +66,15 @@ function renderCityDropdown() {
     const i = ordered.findIndex(c => c.city === state.geoCity);
     if (i > 0) ordered.unshift(ordered.splice(i, 1)[0]);
   }
-  let html = '';
+  // Geo button (mirrors the store sheet's "За відстанню"): shows the detected
+  // city, or offers to detect it.
+  const geoActive = !!state.geoCity;
+  const geoLabel = geoActive
+    ? `📍 Поряд: ${escapeHtml(state.geoCity)} ✓`
+    : '📍 Визначити моє місто';
+  let html = `<div class="city-geo-row">
+    <button type="button" class="geo-sort-btn ${geoActive ? 'active' : ''}" id="city-geo-btn">${geoLabel}</button>
+  </div>`;
   for (const c of ordered) {
     const active = state.city === c.city ? 'active' : '';
     const isGeo = state.geoCity === c.city;
@@ -75,15 +83,10 @@ function renderCityDropdown() {
     </div>`;
   }
   dd.innerHTML = html;
+  const gbtn = $('city-geo-btn');
+  if (gbtn) gbtn.onclick = (e) => { e.stopPropagation(); requestCityGeo(); };
   dd.querySelectorAll('.city-option').forEach(opt => {
-    opt.onclick = () => {
-      state.city = opt.dataset.city;
-      localStorage.setItem('sls_city', state.city);
-      localStorage.setItem('sls_city_manual', '1');  // explicit pick → geo won't override
-      closeCityDD();
-      renderCityBtn();
-      loadCityData();
-    };
+    opt.onclick = () => selectCity(opt.dataset.city, true);  // explicit pick → geo won't override
   });
 }
 
@@ -228,30 +231,60 @@ function getUserPosition(onOk, onErr) {
   }
 }
 
-// Pick the nearest city (by centroid) to the user and float it to the top of
-// the list. Only counts as "your city" within 50 km. Best-effort, silent.
+// Nearest city (by centroid) within 50 km, or null.
 const GEO_CITY_MAX_KM = 50;
+function nearestCity(lat, lng) {
+  let best = null, bestD = Infinity;
+  for (const c of state.cities) {
+    if (c.lat == null || c.lng == null) continue;
+    const d = haversineKm(lat, lng, c.lat, c.lng);
+    if (d < bestD) { bestD = d; best = c.city; }
+  }
+  return (best && bestD <= GEO_CITY_MAX_KM) ? best : null;
+}
+
+function selectCity(city, isManual) {
+  state.city = city;
+  localStorage.setItem('sls_city', city);
+  if (isManual) localStorage.setItem('sls_city_manual', '1');
+  else localStorage.removeItem('sls_city_manual');  // geo selection follows the user
+  closeCityDD();
+  renderCityBtn();
+  loadCityData();
+}
+
+// Auto on open: float the user's city to the top and select it unless they
+// picked one manually. Best-effort, silent.
 function detectCityByGeo() {
   if (!state.cities.length) return;
   getUserPosition((lat, lng) => {
-    let best = null, bestD = Infinity;
-    for (const c of state.cities) {
-      if (c.lat == null || c.lng == null) continue;
-      const d = haversineKm(lat, lng, c.lat, c.lng);
-      if (d < bestD) { bestD = d; best = c.city; }
-    }
-    if (!best || bestD > GEO_CITY_MAX_KM) return;
+    const best = nearestCity(lat, lng);
+    if (!best) return;
     state.geoCity = best;
     if (cityOpen) renderCityDropdown();
-    // Default to the geolocated city unless the user picked one manually.
-    const manual = localStorage.getItem('sls_city_manual');
-    if (!manual && state.city !== best) {
-      state.city = best;
-      localStorage.setItem('sls_city', state.city);
-      renderCityBtn();
-      loadCityData();
+    if (!localStorage.getItem('sls_city_manual') && state.city !== best) {
+      selectCity(best, false);
     }
   });
+}
+
+// Manual trigger from the "📍" button in the city dropdown.
+function requestCityGeo() {
+  if (state.geoCity) { selectCity(state.geoCity, false); return; }
+  const btn = $('city-geo-btn');
+  if (btn) { btn.textContent = '...'; btn.disabled = true; }
+  getUserPosition(
+    (lat, lng) => {
+      const best = nearestCity(lat, lng);
+      if (best) { state.geoCity = best; selectCity(best, false); }
+      else cityGeoFail('Місто не знайдено');
+    },
+    () => cityGeoFail('Немає доступу')
+  );
+}
+function cityGeoFail(msg) {
+  const btn = $('city-geo-btn');
+  if (btn) { btn.textContent = msg; btn.disabled = true; }
 }
 
 function requestGeoSort() {
