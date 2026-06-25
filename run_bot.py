@@ -1,6 +1,5 @@
 import logging
 
-import db
 from bot.app import create_app
 
 logging.basicConfig(
@@ -11,7 +10,6 @@ logging.basicConfig(
 
 
 def main():
-    db.init_db()
     app = create_app()
     logging.info("Bot started")
     app.run_polling()
