@@ -212,22 +212,38 @@ function formatDist(km) {
 
 // Resolve the user's coordinates via Telegram's LocationManager (preferred) or
 // the browser geolocation API. Caches the result so repeat calls don't re-prompt.
-function getUserPosition(onOk, onErr) {
+// opts.prompt: if false (default), never trigger the system permission prompt —
+// only resolve when access is already granted (used for the silent auto-detect
+// on open). Always fails after a timeout so the UI never hangs.
+function getUserPosition(onOk, onErr, opts) {
+  opts = opts || {};
   if (state.userLat != null) { onOk(state.userLat, state.userLng); return; }
-  const ok = (lat, lng) => { state.userLat = lat; state.userLng = lng; onOk(lat, lng); };
-  if (tg.LocationManager) {
-    tg.LocationManager.init(() => {
-      if (!tg.LocationManager.isLocationAvailable) { onErr && onErr(); return; }
-      tg.LocationManager.getLocation((loc) => loc ? ok(loc.latitude, loc.longitude) : (onErr && onErr()));
+
+  let done = false;
+  const ok = (lat, lng) => { if (done) return; done = true; clearTimeout(timer); state.userLat = lat; state.userLng = lng; onOk(lat, lng); };
+  const fail = () => { if (done) return; done = true; clearTimeout(timer); onErr && onErr(); };
+  const timer = setTimeout(fail, 12000);  // getLocation can silently never call back (denied)
+
+  const lm = tg.LocationManager;
+  if (lm) {
+    lm.init(() => {
+      if (!lm.isLocationAvailable) { fail(); return; }
+      if (!lm.isAccessGranted && !opts.prompt) { fail(); return; }  // don't nag on auto-detect
+      lm.getLocation((loc) => loc ? ok(loc.latitude, loc.longitude) : fail());
     });
   } else if ('geolocation' in navigator) {
-    navigator.geolocation.getCurrentPosition(
-      (pos) => ok(pos.coords.latitude, pos.coords.longitude),
-      () => onErr && onErr(),
+    const getPos = () => navigator.geolocation.getCurrentPosition(
+      (pos) => ok(pos.coords.latitude, pos.coords.longitude), fail,
       { enableHighAccuracy: false, timeout: 10000 }
     );
+    if (!opts.prompt && navigator.permissions) {
+      navigator.permissions.query({ name: 'geolocation' })
+        .then(p => p.state === 'granted' ? getPos() : fail()).catch(fail);
+    } else {
+      getPos();
+    }
   } else {
-    onErr && onErr();
+    fail();
   }
 }
 
@@ -279,12 +295,16 @@ function requestCityGeo() {
       if (best) { state.geoCity = best; selectCity(best, false); }
       else cityGeoFail('Місто не знайдено');
     },
-    () => cityGeoFail('Немає доступу')
+    () => cityGeoFail('Немає доступу'),
+    { prompt: true }
   );
 }
 function cityGeoFail(msg) {
   const btn = $('city-geo-btn');
-  if (btn) { btn.textContent = msg; btn.disabled = true; }
+  if (!btn) return;
+  btn.textContent = msg;
+  btn.disabled = true;
+  setTimeout(() => { if (cityOpen) renderCityDropdown(); }, 2000);  // restore so it can be retried
 }
 
 function requestGeoSort() {
@@ -297,7 +317,8 @@ function requestGeoSort() {
     () => {
       btn.textContent = 'Немає доступу';
       setTimeout(() => { btn.textContent = 'За відстанню'; btn.disabled = false; }, 2000);
-    }
+    },
+    { prompt: true }
   );
 }
 
