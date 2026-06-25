@@ -20,6 +20,8 @@ import logging
 import os
 import shutil
 from collections import defaultdict
+from datetime import datetime
+from zoneinfo import ZoneInfo
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import db
@@ -30,6 +32,38 @@ log = logging.getLogger(__name__)
 
 # Units that are just a count/packaging label, not a volume/weight worth showing.
 _COUNT_UNITS = {"шт", "шт.", "уп", "уп.", "пак", "пак.", "компл", "компл."}
+
+# Latin→Cyrillic homoglyph folding for the search index. Scraped titles often
+# carry a Latin letter inside a Cyrillic word ("Хрiн" with a Latin "i"); folding
+# the indexed title lets a Cyrillic query match it. Keep this in sync with
+# normSearch() in webapp/app.js.
+_HOMOGLYPHS = str.maketrans({
+    "a": "а", "c": "с", "e": "е", "i": "і", "o": "о", "p": "р", "x": "х", "y": "у",
+})
+
+
+def _norm_search(s: str) -> str:
+    return (s or "").lower().translate(_HOMOGLYPHS)
+
+
+def _search_rows(cat_products):
+    """Compact city-wide search index: one row per product across all categories.
+
+    Row = [id, normalized_title, category_slug, discount, chain] — just enough
+    for the client to match a query, sort by discount and filter by chain, then
+    lazy-load the matched category file to render full cards.
+    """
+    rows = []
+    for ucat, items in cat_products.items():
+        for item, _ in items:
+            rows.append([
+                item["id"],
+                _norm_search(item["t"]),
+                ucat,
+                item.get("d", 0) or 0,
+                item["ch"],
+            ])
+    return rows
 
 
 def _norm_unit(s: str) -> str:
@@ -56,6 +90,9 @@ def _title_with_unit(title: str | None, unit: str | None) -> str:
 OUTPUT_DIR = os.path.join(os.path.dirname(__file__), "data")
 
 CITY_WORKERS = 6
+
+# curated food-first category order (index per slug, unknown slugs fall to end)
+_UNIFIED_ORDER = {slug: i for i, (slug, _t) in enumerate(UNIFIED)}
 
 
 def write_json(path, data):
@@ -132,6 +169,11 @@ def _generate_city(city, city_store_list, products, sp_by_store, slug_to_title):
 
         best_price = min(sp["price"] for sp in sp_list)
         max_discount = max((sp["discount_pct"] or 0) for sp in sp_list)
+        # Drop corrupt rows: a non-positive price or a discount of 100%+ means a
+        # bad scrape (price 0, or a sentinel old_price like 99999999). These would
+        # otherwise top the discount-sorted feed.
+        if best_price <= 0 or max_discount >= 100:
+            continue
         old_price = next((sp["old_price"] for sp in sp_list if sp.get("old_price")), None)
         promo_end = next((sp["promo_end_date"] for sp in sp_list if sp.get("promo_end_date")), None)
         sub = slug_to_title.get((p["chain"], p.get("category_slug") or ""), "")
@@ -172,7 +214,7 @@ def _generate_city(city, city_store_list, products, sp_by_store, slug_to_title):
             "title": UNIFIED_DICT.get(ucat, ucat),
             "cnt": len(items),
         })
-    categories.sort(key=lambda x: -x["cnt"])
+    categories.sort(key=lambda x: (_UNIFIED_ORDER.get(x["slug"], len(UNIFIED)), -x["cnt"]))
 
     write_json(os.path.join(city_dir, "index.json"), {
         "city": city,
@@ -216,6 +258,8 @@ def _generate_city(city, city_store_list, products, sp_by_store, slug_to_title):
 
         total_products += len(products_compact)
 
+    write_json(os.path.join(city_dir, "search.json"), {"i": _search_rows(cat_products)})
+
     log.info("Generated %s/: %d products, %d stores", city, total_products, len(stores_map))
     return city, total_products
 
@@ -247,6 +291,10 @@ def generate():
 
     write_json(os.path.join(OUTPUT_DIR, "cities.json"), cities_index)
     log.info("Generated cities.json (%d cities)", len(cities))
+
+    # Last-update stamp (Kyiv time) shown on the app's landing screen.
+    generated = datetime.now(ZoneInfo("Europe/Kyiv")).strftime("%Y-%m-%d %H:%M")
+    write_json(os.path.join(OUTPUT_DIR, "meta.json"), {"generated": generated})
 
     with ThreadPoolExecutor(max_workers=CITY_WORKERS) as pool:
         futures = {
