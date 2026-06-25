@@ -22,6 +22,7 @@ let state = {
   userLat: null,
   userLng: null,
   geoSorted: false,
+  geoCity: null,
 };
 
 const ITEMS_PER_PAGE = 30;
@@ -59,11 +60,18 @@ function renderCityDropdown() {
     dd.innerHTML = '<div class="city-option">Немає міст</div>';
     return;
   }
+  // Alphabetical (uk), with the geolocated city floated to the top.
+  const ordered = [...state.cities].sort((a, b) => a.city.localeCompare(b.city, 'uk'));
+  if (state.geoCity) {
+    const i = ordered.findIndex(c => c.city === state.geoCity);
+    if (i > 0) ordered.unshift(ordered.splice(i, 1)[0]);
+  }
   let html = '';
-  for (const c of state.cities) {
+  for (const c of ordered) {
     const active = state.city === c.city ? 'active' : '';
+    const isGeo = state.geoCity === c.city;
     html += `<div class="city-option ${active}" data-city="${escapeHtml(c.city)}">
-      <span>${escapeHtml(c.city)}</span><span class="city-count">${c.store_cnt} маг.</span>
+      <span>${isGeo ? '📍 ' : ''}${escapeHtml(c.city)}</span><span class="city-count">${c.store_cnt} маг.</span>
     </div>`;
   }
   dd.innerHTML = html;
@@ -198,41 +206,63 @@ function formatDist(km) {
   return km.toFixed(1) + ' км';
 }
 
+// Resolve the user's coordinates via Telegram's LocationManager (preferred) or
+// the browser geolocation API. Caches the result so repeat calls don't re-prompt.
+function getUserPosition(onOk, onErr) {
+  if (state.userLat != null) { onOk(state.userLat, state.userLng); return; }
+  const ok = (lat, lng) => { state.userLat = lat; state.userLng = lng; onOk(lat, lng); };
+  if (tg.LocationManager) {
+    tg.LocationManager.init(() => {
+      if (!tg.LocationManager.isLocationAvailable) { onErr && onErr(); return; }
+      tg.LocationManager.getLocation((loc) => loc ? ok(loc.latitude, loc.longitude) : (onErr && onErr()));
+    });
+  } else if ('geolocation' in navigator) {
+    navigator.geolocation.getCurrentPosition(
+      (pos) => ok(pos.coords.latitude, pos.coords.longitude),
+      () => onErr && onErr(),
+      { enableHighAccuracy: false, timeout: 10000 }
+    );
+  } else {
+    onErr && onErr();
+  }
+}
+
+// Pick the nearest city (by centroid) to the user and float it to the top of
+// the list. Only counts as "your city" within 50 km. Best-effort, silent.
+const GEO_CITY_MAX_KM = 50;
+function detectCityByGeo() {
+  if (!state.cities.length) return;
+  getUserPosition((lat, lng) => {
+    let best = null, bestD = Infinity;
+    for (const c of state.cities) {
+      if (c.lat == null || c.lng == null) continue;
+      const d = haversineKm(lat, lng, c.lat, c.lng);
+      if (d < bestD) { bestD = d; best = c.city; }
+    }
+    if (!best || bestD > GEO_CITY_MAX_KM) return;
+    state.geoCity = best;
+    if (cityOpen) renderCityDropdown();
+    if (!state.city) {  // nothing chosen yet → default to the user's city
+      state.city = best;
+      localStorage.setItem('sls_city', state.city);
+      renderCityBtn();
+      loadCityData();
+    }
+  });
+}
+
 function requestGeoSort() {
   const btn = $('geo-sort-btn');
   if (!btn) return;
   btn.textContent = '...';
   btn.disabled = true;
-
-  const onSuccess = (lat, lng) => {
-    state.userLat = lat;
-    state.userLng = lng;
-    state.geoSorted = true;
-    renderStoreList($('sheet-search-input').value.trim());
-  };
-
-  const onError = () => {
-    btn.textContent = 'Немає доступу';
-    setTimeout(() => { btn.textContent = 'За відстанню'; btn.disabled = false; }, 2000);
-  };
-
-  if (tg.LocationManager) {
-    tg.LocationManager.init(() => {
-      if (!tg.LocationManager.isLocationAvailable) { onError(); return; }
-      tg.LocationManager.getLocation((loc) => {
-        if (loc) onSuccess(loc.latitude, loc.longitude);
-        else onError();
-      });
-    });
-  } else if ('geolocation' in navigator) {
-    navigator.geolocation.getCurrentPosition(
-      (pos) => onSuccess(pos.coords.latitude, pos.coords.longitude),
-      onError,
-      { enableHighAccuracy: false, timeout: 10000 }
-    );
-  } else {
-    onError();
-  }
+  getUserPosition(
+    () => { state.geoSorted = true; renderStoreList($('sheet-search-input').value.trim()); },
+    () => {
+      btn.textContent = 'Немає доступу';
+      setTimeout(() => { btn.textContent = 'За відстанню'; btn.disabled = false; }, 2000);
+    }
+  );
 }
 
 function renderStoreList(query) {
@@ -683,4 +713,5 @@ $('load-more-btn').addEventListener('click', () => appendProducts());
   if (state.city) {
     await loadCityData();
   }
+  detectCityByGeo();  // float the user's city to the top (and select it if none chosen)
 })();

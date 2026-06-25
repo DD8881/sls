@@ -231,11 +231,19 @@ def generate():
         for sid in store_ids:
             for sp in sp_by_store.get(sid, []):
                 product_ids.add(sp["product_id"])
-        cities_index.append({
+        # Representative coordinate (mean of store coords) so the client can
+        # pick the nearest city to the user's geolocation.
+        lats = [s["lat"] for s in city_stores[city] if s.get("lat") is not None]
+        lngs = [s["lng"] for s in city_stores[city] if s.get("lng") is not None]
+        entry = {
             "city": city,
             "store_cnt": len(store_ids),
             "product_cnt": len(product_ids),
-        })
+        }
+        if lats and lngs:
+            entry["lat"] = round(sum(lats) / len(lats), 4)
+            entry["lng"] = round(sum(lngs) / len(lngs), 4)
+        cities_index.append(entry)
 
     write_json(os.path.join(OUTPUT_DIR, "cities.json"), cities_index)
     log.info("Generated cities.json (%d cities)", len(cities))
