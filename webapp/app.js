@@ -58,10 +58,11 @@ function formatPromoEnd(s) {
   return m ? `${m[3]}.${m[2]}` : s;
 }
 
-// "2026-06-25" → "25.06.2026"
+// "2026-06-25 18:30" → "25.06.2026 18:30" (time optional)
 function formatDate(s) {
-  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(s || ''));
-  return m ? `${m[3]}.${m[2]}.${m[1]}` : s;
+  const m = /^(\d{4})-(\d{2})-(\d{2})(?:[ T](\d{2}):(\d{2}))?/.exec(String(s || ''));
+  if (!m) return s;
+  return `${m[3]}.${m[2]}.${m[1]}` + (m[4] ? ` ${m[4]}:${m[5]}` : '');
 }
 
 async function fetchJSON(path) {

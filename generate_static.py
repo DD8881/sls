@@ -21,6 +21,7 @@ import os
 import shutil
 from collections import defaultdict
 from datetime import datetime
+from zoneinfo import ZoneInfo
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import db
@@ -291,8 +292,9 @@ def generate():
     write_json(os.path.join(OUTPUT_DIR, "cities.json"), cities_index)
     log.info("Generated cities.json (%d cities)", len(cities))
 
-    # Last-update stamp shown on the app's landing screen.
-    write_json(os.path.join(OUTPUT_DIR, "meta.json"), {"generated": datetime.now().strftime("%Y-%m-%d")})
+    # Last-update stamp (Kyiv time) shown on the app's landing screen.
+    generated = datetime.now(ZoneInfo("Europe/Kyiv")).strftime("%Y-%m-%d %H:%M")
+    write_json(os.path.join(OUTPUT_DIR, "meta.json"), {"generated": generated})
 
     with ThreadPoolExecutor(max_workers=CITY_WORKERS) as pool:
         futures = {
