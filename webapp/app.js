@@ -232,14 +232,13 @@ function getUserPosition(onOk, onErr, opts) {
     lm.init(() => {
       if (lm.isAccessGranted) {
         lm.getLocation((loc) => loc ? ok(loc.latitude, loc.longitude) : fail());
-        return;
-      }
-      if (!opts.prompt) { fail(); return; }            // silent auto-detect: never prompt
-      if (!lm.isAccessRequested && lm.isLocationAvailable) {
-        lm.getLocation((loc) => loc ? ok(loc.latitude, loc.longitude) : denied());  // native prompt
+      } else if (opts.prompt) {
+        // Explicit tap: let Telegram show its own prompt (or, when iOS-level
+        // location is off, its "enable in Settings" alert with a Параметри
+        // button). Returns null if the user dismisses it.
+        lm.getLocation((loc) => loc ? ok(loc.latitude, loc.longitude) : denied());
       } else {
-        if (lm.openSettings) lm.openSettings();         // previously denied / iOS "Never"
-        denied();
+        fail();  // silent auto-detect: never prompt
       }
     });
   } else if ('geolocation' in navigator) {
