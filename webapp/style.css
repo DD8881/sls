@@ -128,6 +128,16 @@ body {
 }
 .city-geo-row .geo-sort-btn { width: 100%; padding: 8px 10px; font-size: 13px; }
 
+.geo-hint {
+  padding: 10px 14px;
+  font-size: 12.5px;
+  line-height: 1.45;
+  color: var(--hint);
+  background: var(--secondary-bg);
+  border-bottom: 1px solid var(--section-bg);
+}
+.geo-hint b { color: var(--text); font-weight: 600; }
+
 /* Store tabs */
 .store-tabs {
   display: flex;

@@ -23,7 +23,10 @@ let state = {
   userLng: null,
   geoSorted: false,
   geoCity: null,
+  geoHint: null,  // contextual message shown when a geo request fails
 };
+
+const GEO_DENIED_HINT = 'Доступ до геолокації вимкнено. Увімкніть його для Telegram у Налаштуваннях — і застосунок визначить ваше місто та найближчі магазини.';
 
 const ITEMS_PER_PAGE = 30;
 const CHAIN_LABELS = { silpo: 'Silpo', novus: 'Novus', metro: 'Metro', varus: 'Varus', atb: 'АТБ', fora: 'Fora', auchan: 'Ашан' };
@@ -75,6 +78,7 @@ function renderCityDropdown() {
   let html = `<div class="city-geo-row">
     <button type="button" class="geo-sort-btn ${geoActive ? 'active' : ''}" id="city-geo-btn">${geoLabel}</button>
   </div>`;
+  if (state.geoHint) html += `<div class="geo-hint">📍 ${escapeHtml(state.geoHint)}</div>`;
   for (const c of ordered) {
     const active = state.city === c.city ? 'active' : '';
     const isGeo = state.geoCity === c.city;
@@ -94,7 +98,7 @@ function toggleCityDD() {
   cityOpen = !cityOpen;
   $('city-btn').classList.toggle('open', cityOpen);
   $('city-dropdown').classList.toggle('open', cityOpen);
-  if (cityOpen) renderCityDropdown();
+  if (cityOpen) { state.geoHint = null; renderCityDropdown(); }
 }
 
 function closeCityDD() {
@@ -184,6 +188,7 @@ function renderStoreFilter() {
 }
 
 function openStoreSheet() {
+  state.geoHint = null;
   $('sheet-overlay').classList.add('open');
   $('store-sheet').classList.add('open');
   $('sheet-search-input').value = '';
@@ -270,6 +275,7 @@ function nearestCity(lat, lng) {
 }
 
 function selectCity(city, isManual) {
+  state.geoHint = null;
   state.city = city;
   localStorage.setItem('sls_city', city);
   if (isManual) localStorage.setItem('sls_city_manual', '1');
@@ -303,18 +309,15 @@ function requestCityGeo() {
     (lat, lng) => {
       const best = nearestCity(lat, lng);
       if (best) { state.geoCity = best; selectCity(best, false); }
-      else cityGeoFail('Місто не знайдено');
+      else cityGeoFail('Поблизу не знайдено міст зі знижками.');
     },
-    () => cityGeoFail('Немає доступу'),
-    { prompt: true, onDenied: () => cityGeoFail('Дозвольте локацію в налаштуваннях') }
+    () => cityGeoFail(GEO_DENIED_HINT),
+    { prompt: true, onDenied: () => cityGeoFail(GEO_DENIED_HINT) }
   );
 }
 function cityGeoFail(msg) {
-  const btn = $('city-geo-btn');
-  if (!btn) return;
-  btn.textContent = msg;
-  btn.disabled = true;
-  setTimeout(() => { if (cityOpen) renderCityDropdown(); }, 2000);  // restore so it can be retried
+  state.geoHint = msg;
+  if (cityOpen) renderCityDropdown();  // restores the button + shows the hint
 }
 
 function requestGeoSort() {
@@ -322,14 +325,11 @@ function requestGeoSort() {
   if (!btn) return;
   btn.textContent = '...';
   btn.disabled = true;
-  const resetBtn = (msg) => {
-    btn.textContent = msg;
-    setTimeout(() => { btn.textContent = 'За відстанню'; btn.disabled = false; }, 2000);
-  };
+  const onFail = () => { state.geoHint = GEO_DENIED_HINT; renderStoreList($('sheet-search-input').value.trim()); };
   getUserPosition(
-    () => { state.geoSorted = true; renderStoreList($('sheet-search-input').value.trim()); },
-    () => resetBtn('Немає доступу'),
-    { prompt: true, onDenied: () => resetBtn('Дозвольте в налаштуваннях') }
+    () => { state.geoHint = null; state.geoSorted = true; renderStoreList($('sheet-search-input').value.trim()); },
+    onFail,
+    { prompt: true, onDenied: onFail }
   );
 }
 
@@ -360,6 +360,7 @@ function renderStoreList(query) {
     <div class="sheet-store-info"><span class="sheet-store-name">Всі магазини</span></div>
     ${geoAvailable ? `<button type="button" class="geo-sort-btn ${geoActive ? 'active' : ''}" id="geo-sort-btn">${geoActive ? 'За відстанню ✓' : 'За відстанню'}</button>` : ''}
   </div>`;
+  if (state.geoHint) html += `<div class="geo-hint">📍 ${escapeHtml(state.geoHint)}</div>`;
   for (const s of stores) {
     const active = state.store === s.id ? 'active' : '';
     const chainLabel = CHAIN_LABELS[s.chain] || s.chain;
