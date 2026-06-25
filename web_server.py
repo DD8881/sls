@@ -20,16 +20,10 @@ def index():
 
 @app.route("/data/<path:filepath>")
 def serve_data(filepath):
-    # The generator writes a gzipped twin (foo.json + foo.json.gz). Data files run
-    # to several MB uncompressed (the city search index is ~13MB), which stalls on
-    # mobile; serve the precompressed copy when the client accepts gzip.
-    accepts_gzip = "gzip" in request.headers.get("Accept-Encoding", "")
-    if accepts_gzip and os.path.exists(os.path.join(DATA_DIR, filepath + ".gz")):
-        resp = make_response(send_from_directory(DATA_DIR, filepath + ".gz"))
-        resp.headers["Content-Encoding"] = "gzip"
-        resp.headers["Content-Type"] = "application/json; charset=utf-8"
-        resp.headers["Vary"] = "Accept-Encoding"
-        return resp
+    # NOTE: previously served the precompressed .gz twin with Content-Encoding:
+    # gzip, but the iOS Telegram webview did not transparently decompress fetch()
+    # responses, so res.json() choked on raw gzip bytes and all data loads failed.
+    # Serve plain JSON; revisit on-the-fly compression at the proxy if needed.
     return send_from_directory(DATA_DIR, filepath)
 
 
