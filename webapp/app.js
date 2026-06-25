@@ -27,6 +27,8 @@ let state = {
 };
 
 const GEO_DENIED_HINT = 'Доступ до геолокації вимкнено. Увімкніть його для Telegram у Налаштуваннях — і застосунок визначить ваше місто та найближчі магазини.';
+const GEO_FIX_TIMEOUT = 3000;      // give up fast when waiting on a location fix
+const GEO_PROMPT_TIMEOUT = 25000;  // but allow time while a permission dialog is open
 
 const ITEMS_PER_PAGE = 30;
 const CHAIN_LABELS = { silpo: 'Silpo', novus: 'Novus', metro: 'Metro', varus: 'Varus', atb: 'АТБ', fora: 'Fora', auchan: 'Ашан' };
@@ -224,13 +226,14 @@ function getUserPosition(onOk, onErr, opts) {
   opts = opts || {};
   if (state.userLat != null) { onOk(state.userLat, state.userLng); return; }
 
-  let done = false;
+  let done = false, timer;
+  const arm = (ms) => { clearTimeout(timer); timer = setTimeout(fail, ms); };
   const ok = (lat, lng) => { if (done) return; done = true; clearTimeout(timer); state.userLat = lat; state.userLng = lng; onOk(lat, lng); };
   const fail = () => { if (done) return; done = true; clearTimeout(timer); onErr && onErr(); };
   // Access not granted and can't be (re)prompted inline → caller should guide
   // the user to settings. Falls back to onErr when no onDenied is given.
   const denied = () => { if (done) return; done = true; clearTimeout(timer); (opts.onDenied || onErr) && (opts.onDenied || onErr)(); };
-  const timer = setTimeout(fail, 12000);  // getLocation can silently never call back
+  arm(GEO_FIX_TIMEOUT);  // fast give-up unless a permission dialog opens (re-armed below)
 
   const lm = tg.LocationManager;
   if (lm) {
@@ -240,22 +243,24 @@ function getUserPosition(onOk, onErr, opts) {
       } else if (opts.prompt) {
         // Explicit tap: let Telegram show its own prompt (or, when iOS-level
         // location is off, its "enable in Settings" alert with a Параметри
-        // button). Returns null if the user dismisses it.
+        // button). The user needs time to decide, so extend the timeout.
+        arm(GEO_PROMPT_TIMEOUT);
         lm.getLocation((loc) => loc ? ok(loc.latitude, loc.longitude) : denied());
       } else {
         fail();  // silent auto-detect: never prompt
       }
     });
   } else if ('geolocation' in navigator) {
-    const getPos = () => navigator.geolocation.getCurrentPosition(
+    const getPos = (ms) => navigator.geolocation.getCurrentPosition(
       (pos) => ok(pos.coords.latitude, pos.coords.longitude), fail,
-      { enableHighAccuracy: false, timeout: 10000 }
+      { enableHighAccuracy: false, timeout: ms }
     );
     if (!opts.prompt && navigator.permissions) {
       navigator.permissions.query({ name: 'geolocation' })
-        .then(p => p.state === 'granted' ? getPos() : fail()).catch(fail);
+        .then(p => p.state === 'granted' ? getPos(GEO_FIX_TIMEOUT) : fail()).catch(fail);
     } else {
-      getPos();
+      arm(GEO_PROMPT_TIMEOUT);  // the browser may show its own permission prompt
+      getPos(GEO_PROMPT_TIMEOUT);
     }
   } else {
     fail();
