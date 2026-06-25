@@ -222,14 +222,25 @@ function getUserPosition(onOk, onErr, opts) {
   let done = false;
   const ok = (lat, lng) => { if (done) return; done = true; clearTimeout(timer); state.userLat = lat; state.userLng = lng; onOk(lat, lng); };
   const fail = () => { if (done) return; done = true; clearTimeout(timer); onErr && onErr(); };
-  const timer = setTimeout(fail, 12000);  // getLocation can silently never call back (denied)
+  // Access not granted and can't be (re)prompted inline → caller should guide
+  // the user to settings. Falls back to onErr when no onDenied is given.
+  const denied = () => { if (done) return; done = true; clearTimeout(timer); (opts.onDenied || onErr) && (opts.onDenied || onErr)(); };
+  const timer = setTimeout(fail, 12000);  // getLocation can silently never call back
 
   const lm = tg.LocationManager;
   if (lm) {
     lm.init(() => {
-      if (!lm.isLocationAvailable) { fail(); return; }
-      if (!lm.isAccessGranted && !opts.prompt) { fail(); return; }  // don't nag on auto-detect
-      lm.getLocation((loc) => loc ? ok(loc.latitude, loc.longitude) : fail());
+      if (lm.isAccessGranted) {
+        lm.getLocation((loc) => loc ? ok(loc.latitude, loc.longitude) : fail());
+        return;
+      }
+      if (!opts.prompt) { fail(); return; }            // silent auto-detect: never prompt
+      if (!lm.isAccessRequested && lm.isLocationAvailable) {
+        lm.getLocation((loc) => loc ? ok(loc.latitude, loc.longitude) : denied());  // native prompt
+      } else {
+        if (lm.openSettings) lm.openSettings();         // previously denied / iOS "Never"
+        denied();
+      }
     });
   } else if ('geolocation' in navigator) {
     const getPos = () => navigator.geolocation.getCurrentPosition(
@@ -296,7 +307,7 @@ function requestCityGeo() {
       else cityGeoFail('Місто не знайдено');
     },
     () => cityGeoFail('Немає доступу'),
-    { prompt: true }
+    { prompt: true, onDenied: () => cityGeoFail('Дозвольте локацію в налаштуваннях') }
   );
 }
 function cityGeoFail(msg) {
@@ -312,13 +323,14 @@ function requestGeoSort() {
   if (!btn) return;
   btn.textContent = '...';
   btn.disabled = true;
+  const resetBtn = (msg) => {
+    btn.textContent = msg;
+    setTimeout(() => { btn.textContent = 'За відстанню'; btn.disabled = false; }, 2000);
+  };
   getUserPosition(
     () => { state.geoSorted = true; renderStoreList($('sheet-search-input').value.trim()); },
-    () => {
-      btn.textContent = 'Немає доступу';
-      setTimeout(() => { btn.textContent = 'За відстанню'; btn.disabled = false; }, 2000);
-    },
-    { prompt: true }
+    () => resetBtn('Немає доступу'),
+    { prompt: true, onDenied: () => resetBtn('Дозвольте в налаштуваннях') }
   );
 }
 
