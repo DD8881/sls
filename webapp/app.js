@@ -23,6 +23,7 @@ let state = {
   catCache: {},         // {cat: {list, byId}} — full category products, lazy
   matchRows: null,      // index rows feeding the grid (feed/search), pre chain-filter
   rowMode: false,       // grid driven by city-wide index rows vs a single category
+  meta: null,           // {generated} — static build date, shown on the landing
   searchToken: 0,       // guards against out-of-order async index renders
   userLat: null,
   userLng: null,
@@ -55,6 +56,12 @@ function normSearch(s) {
 function formatPromoEnd(s) {
   const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(s || ''));
   return m ? `${m[3]}.${m[2]}` : s;
+}
+
+// "2026-06-25" → "25.06.2026"
+function formatDate(s) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(s || ''));
+  return m ? `${m[3]}.${m[2]}.${m[1]}` : s;
 }
 
 async function fetchJSON(path) {
@@ -842,6 +849,13 @@ function showLanding() {
   $('welcome-sub').textContent = state.city
     ? 'Оберіть категорію або скористайтесь пошуком, щоб побачити знижки'
     : 'Оберіть місто, щоб побачити найкращі знижки поряд';
+  const wd = $('welcome-date');
+  if (state.meta && state.meta.generated) {
+    wd.textContent = `Оновлено: ${formatDate(state.meta.generated)}`;
+    wd.style.display = 'block';
+  } else {
+    wd.style.display = 'none';
+  }
   $('welcome').style.display = 'flex';
 }
 
@@ -970,6 +984,7 @@ $('load-more-btn').addEventListener('click', () => appendProducts());
 // Init
 (async () => {
   await loadCities();
+  state.meta = await fetchJSON('meta.json');
   if (state.city) {
     await loadCityData();
   } else {
