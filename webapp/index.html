@@ -5,23 +5,18 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
   <title>Знижки</title>
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
-  <link rel="stylesheet" href="/static/style.css?v=2">
+  <link rel="stylesheet" href="/static/style.css?v=3">
 </head>
 <body>
   <div id="app">
     <div class="top-bar">
-      <div class="top-row">
-        <div class="brand">
-          <img class="brand-logo" src="/static/logo.png" alt="">
-          <span class="brand-name">Знижки</span>
-        </div>
-        <div class="city-select-wrap">
-          <button type="button" class="city-select-btn" id="city-btn">Оберіть місто</button>
-          <div class="city-dropdown" id="city-dropdown"></div>
-        </div>
+      <div class="city-select-wrap">
+        <button type="button" class="city-select-btn" id="city-btn">Оберіть місто</button>
+        <div class="city-dropdown" id="city-dropdown"></div>
       </div>
       <div class="search-bar">
-        <input type="text" id="search-input" placeholder="Пошук товарів...">
+        <span class="search-icon">🔍</span>
+        <input type="text" id="search-input" placeholder="Пошук товарів за всіма категоріями">
       </div>
     </div>
 
@@ -68,6 +63,6 @@
     <div class="sheet-list" id="sheet-list"></div>
   </div>
 
-  <script src="/static/app.js?v=2"></script>
+  <script src="/static/app.js?v=3"></script>
 </body>
 </html>

@@ -93,7 +93,9 @@ function renderCityBtn() {
 function renderCityDropdown() {
   const dd = $('city-dropdown');
   if (!state.cities.length) {
-    dd.innerHTML = '<div class="city-option">Немає міст</div>';
+    dd.innerHTML = '<div class="city-option" id="city-retry">↻ Завантажити список міст</div>';
+    const r = $('city-retry');
+    if (r) r.onclick = async (e) => { e.stopPropagation(); await loadCities(); renderCityDropdown(); };
     return;
   }
   // Alphabetical (uk), with the geolocated city floated to the top.

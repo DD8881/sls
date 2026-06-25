@@ -11,7 +11,11 @@ DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
 
 @app.route("/")
 def index():
-    return send_from_directory("webapp", "index.html")
+    # Never let the Telegram webview cache the shell, so bumped ?v= asset URLs
+    # (and any fix in them) are always picked up on reopen.
+    resp = make_response(send_from_directory("webapp", "index.html"))
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
 
 
 @app.route("/data/<path:filepath>")

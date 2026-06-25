@@ -37,48 +37,35 @@ body {
   overflow: visible;
 }
 
+.search-bar { position: relative; }
+
+.search-bar .search-icon {
+  position: absolute;
+  left: 12px;
+  top: 50%;
+  transform: translateY(-50%);
+  font-size: 15px;
+  opacity: 0.55;
+  pointer-events: none;
+}
+
 .search-bar input {
   width: 100%;
-  padding: 10px 14px;
-  border: none;
+  padding: 12px 14px 12px 40px;
+  border: 1.5px solid var(--hint);
   border-radius: 12px;
-  background: var(--secondary-bg);
+  background: var(--section-bg);
   color: var(--text);
   font-size: 15px;
   outline: none;
+  transition: border-color 0.15s;
 }
 
+.search-bar input:focus { border-color: var(--button); }
 .search-bar input::placeholder { color: var(--hint); }
 
-/* Brand + city row */
-.top-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.brand {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  flex-shrink: 0;
-}
-
-.brand-logo {
-  width: 28px;
-  height: 28px;
-  border-radius: 7px;
-}
-
-.brand-name {
-  font-size: 16px;
-  font-weight: 700;
-  color: var(--text);
-  letter-spacing: -0.2px;
-}
-
 /* City selector */
-.city-select-wrap { position: relative; flex: 1; min-width: 0; }
+.city-select-wrap { position: relative; }
 
 .city-select-btn {
   width: 100%;
