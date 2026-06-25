@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="uk">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <title>Знижки</title>
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <div id="app">
+    <div class="top-bar">
+      <div class="city-select-wrap">
+        <button type="button" class="city-select-btn" id="city-btn">Оберіть місто</button>
+        <div class="city-dropdown" id="city-dropdown"></div>
+      </div>
+      <div class="search-bar">
+        <input type="text" id="search-input" placeholder="Пошук товарів...">
+      </div>
+    </div>
+
+    <div class="store-tabs" id="store-tabs"></div>
+
+    <div class="store-filter-wrap" id="store-filter-wrap" style="display:none">
+      <button type="button" class="store-filter-btn" id="store-filter-btn">Всі магазини</button>
+    </div>
+
+    <div class="category-select-wrap" id="category-wrap" style="display:none">
+      <button type="button" class="category-select-btn" id="category-btn">Всі категорії</button>
+      <div class="category-dropdown" id="category-dropdown"></div>
+    </div>
+
+    <div class="products-grid" id="products-grid"></div>
+
+    <div class="load-more" id="load-more" style="display:none">
+      <button id="load-more-btn">Завантажити ще</button>
+    </div>
+
+    <div class="loading" id="loading" style="display:none">
+      <div class="spinner"></div>
+    </div>
+
+    <div class="empty-state" id="empty-state" style="display:none">
+      Нічого не знайдено
+    </div>
+  </div>
+
+  <div class="sheet-overlay" id="sheet-overlay"></div>
+  <div class="sheet" id="store-sheet">
+    <div class="sheet-handle"></div>
+    <div class="sheet-search">
+      <input type="text" id="sheet-search-input" placeholder="Пошук магазину...">
+    </div>
+    <div class="sheet-list" id="sheet-list"></div>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
