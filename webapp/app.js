@@ -140,14 +140,11 @@ $('city-btn').addEventListener('click', (e) => {
 
 // ---- View modes ----
 // searchActive: a query of >= 2 chars → city-wide search.
-// rowMode: the grid is driven by the city-wide index rows (feed OR search), as
-// opposed to a single loaded category. inFeed: city chosen, no category, no
-// search → "top discounts city-wide".
+// rowMode: the grid is driven by the city-wide search index rows, as opposed to
+// a single loaded category. With no category and no search we show a logo
+// placeholder and load nothing (see showLanding).
 function searchActive() {
   return normSearch(state.search).length >= SEARCH_MIN_CHARS;
-}
-function inFeed() {
-  return !!state.city && !state.category && !searchActive();
 }
 
 // ---- Chains ----
@@ -673,6 +670,7 @@ function bindCardEvents(container) {
 // Mirrors the real card layout (80x80 image + two text lines) so the swap to
 // real cards doesn't shift the layout.
 function renderSkeleton(n) {
+  $('welcome').style.display = 'none';
   const card = `
     <div class="skeleton-card">
       <div class="skeleton-img"></div>
@@ -798,41 +796,59 @@ async function loadCityData() {
   state.matchRows = null;
   $('result-count').style.display = 'none';
 
-  $('welcome').style.display = 'none';
   $('loading').style.display = 'flex';
   state.index = await fetchJSON(`${encodeURIComponent(state.city)}/index.json`);
+  $('loading').style.display = 'none';
   state.products = [];
   state.filtered = [];
-  refreshView();   // city chosen, no category → top-discounts feed
+  refreshView();   // city chosen, no category yet → logo placeholder
 }
 
-// Dispatch to the right view: city-wide search (query ≥ 2 chars), the
-// top-discounts feed (city chosen, no category), or a single open category.
+// Dispatch to the right view: city-wide search (query ≥ 2 chars), a single open
+// category, or — with neither — the logo landing (loads nothing).
 function refreshView() {
-  if (searchActive()) return runIndexView('search');
-  if (inFeed()) return runIndexView('feed');
+  if (searchActive()) return runSearch();
+  if (!state.category) return showLanding();
   renderCategories();
   renderStoreFilter();
   applyFilters();
 }
 
-// ---- City-wide views (feed + search), both driven by the compact index ----
-async function runIndexView(kind) {
+// Idle state: no category chosen and no search. Show the logo placeholder where
+// the product grid would be and load nothing — the category picker and search
+// are the entry points. (Avoids pulling the whole-city index on landing.)
+function showLanding() {
+  state.rowMode = false;
+  state.matchRows = null;
+  state.products = [];
+  state.filtered = [];
+  $('products-grid').innerHTML = '';
+  $('result-count').style.display = 'none';
+  $('load-more').style.display = 'none';
+  $('loading').style.display = 'none';
+  $('empty-state').style.display = 'none';
+  renderChains();
+  renderCategories();
+  renderStoreFilter();
+  $('welcome-sub').textContent = state.city
+    ? 'Оберіть категорію або скористайтесь пошуком, щоб побачити знижки'
+    : 'Оберіть місто, щоб побачити найкращі знижки поряд';
+  $('welcome').style.display = 'flex';
+}
+
+// ---- City-wide search (across categories), driven by the compact index ----
+async function runSearch() {
   const token = ++state.searchToken;
   state.rowMode = true;
+  $('welcome').style.display = 'none';
   renderSkeleton(6);
   $('empty-state').style.display = 'none';
 
   const ok = await ensureSearchIndex();
   if (token !== state.searchToken) return;  // a newer keystroke/click superseded us
 
-  let candidates;
-  if (kind === 'search') {
-    const nq = normSearch(state.search);
-    candidates = ok ? state.searchIndex.filter(r => r[1].includes(nq)) : [];
-  } else {
-    candidates = ok ? state.searchIndex : [];
-  }
+  const nq = normSearch(state.search);
+  const candidates = ok ? state.searchIndex.filter(r => r[1].includes(nq)) : [];
   state.matchRows = candidates;
 
   renderChains();
@@ -857,21 +873,17 @@ async function runIndexView(kind) {
   state.offset = 0;
 
   $('loading').style.display = 'none';
-  renderRowCount(kind, rows.length, top.length);
+  renderResultCount(rows.length, top.length);
   renderProducts();
 }
 
-function renderRowCount(kind, total, shown) {
+function renderResultCount(total, shown) {
   const el = $('result-count');
   if (total === 0) { el.style.display = 'none'; return; }
   el.style.display = 'block';
-  if (kind === 'search') {
-    el.innerHTML = total > shown
-      ? `Знайдено <b>${total}</b> по всьому місту — показано ${shown} з найбільшими знижками. Уточніть запит, щоб звузити.`
-      : `Знайдено <b>${total}</b> по всьому місту`;
-  } else {
-    el.innerHTML = `🔥 Найбільші знижки${state.chain ? '' : ' по всьому місту'} — показано ${shown}`;
-  }
+  el.innerHTML = total > shown
+    ? `Знайдено <b>${total}</b> по всьому місту — показано ${shown} з найбільшими знижками. Уточніть запит, щоб звузити.`
+    : `Знайдено <b>${total}</b> по всьому місту`;
 }
 
 async function loadCategoryProducts() {
@@ -879,7 +891,7 @@ async function loadCategoryProducts() {
     state.products = [];
     state.storeProductIds = null;
     state.subcategory = null;
-    refreshView();   // "Всі категорії" → back to the top-discounts feed
+    refreshView();   // "Всі категорії" → back to the logo landing
     return;
   }
 
@@ -898,9 +910,9 @@ async function loadCategoryProducts() {
   }
 }
 
-// Category-mode filtering over the open category. City-wide views (feed/search)
-// go through runIndexView() instead; the search clause here only handles a
-// leftover short (sub-threshold) query while a category is open.
+// Category-mode filtering over the open category. City-wide search goes through
+// runSearch() instead; the search clause here only handles a leftover short
+// (sub-threshold) query while a category is open.
 function applyFilters() {
   state.rowMode = false;
   state.matchRows = null;
@@ -952,7 +964,7 @@ $('load-more-btn').addEventListener('click', () => appendProducts());
   if (state.city) {
     await loadCityData();
   } else {
-    $('welcome').style.display = 'flex';
+    showLanding();
   }
   detectCityByGeo();  // float the user's city to the top (and select it if none chosen)
 })();
