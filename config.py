@@ -6,6 +6,10 @@ load_dotenv()
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 
+# Private group/channel that receives user feedback (bot must be a member there).
+# Find it via getUpdates after the bot posts once; for groups it is negative.
+FEEDBACK_CHAT_ID = os.getenv("FEEDBACK_CHAT_ID", "")
+
 DATABASE_PATH = os.getenv("DATABASE_PATH", "discounts.db")
 
 SILPO_BRANCH_ID = os.getenv("SILPO_BRANCH_ID", "00000000-0000-0000-0000-000000000000")

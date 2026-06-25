@@ -41,6 +41,10 @@ const SEARCH_CAP = 300;            // max search hits rendered (sorted by discou
 const SEARCH_MIN_CHARS = 2;        // shorter queries stay within the open category
 const CHAIN_LABELS = { silpo: 'Silpo', novus: 'Novus', metro: 'Metro', varus: 'Varus', atb: 'АТБ', fora: 'Fora', auchan: 'Ашан', fozzy: 'Fozzy' };
 
+// Bot share link. Hardcoded — the t.me slug is fixed and can't be renamed, and
+// the Telegram WebApp SDK doesn't expose the bot username at runtime.
+const BOT_LINK = 'https://t.me/sales_ua_bot';
+
 // Latin→Cyrillic homoglyph folding for search. Scraped Ukrainian titles often
 // carry a Latin letter inside a Cyrillic word ("Хрiн" with a Latin "i"), which
 // breaks a naive substring match against a Cyrillic query. Folding both the
@@ -857,6 +861,7 @@ function showLanding() {
   } else {
     wd.style.display = 'none';
   }
+  $('share-btn').style.display = BOT_LINK ? 'inline-flex' : 'none';
   $('welcome').style.display = 'flex';
 }
 
@@ -981,6 +986,83 @@ $('search-input').addEventListener('input', (e) => {
 });
 
 $('load-more-btn').addEventListener('click', () => appendProducts());
+
+// ---- Share the bot ----
+let toastTimer = null;
+function showToast(msg) {
+  const t = $('toast');
+  t.textContent = msg;
+  t.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => t.classList.remove('show'), 1800);
+}
+
+// Copy text to the clipboard. The async Clipboard API is unreliable inside the
+// Telegram webview, so fall back to a hidden textarea + execCommand.
+function copyText(text) {
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    return navigator.clipboard.writeText(text).catch(() => legacyCopy(text));
+  }
+  return Promise.resolve(legacyCopy(text));
+}
+function legacyCopy(text) {
+  const ta = document.createElement('textarea');
+  ta.value = text;
+  ta.style.position = 'fixed';
+  ta.style.opacity = '0';
+  document.body.appendChild(ta);
+  ta.select();
+  try { document.execCommand('copy'); } catch (_) {}
+  document.body.removeChild(ta);
+}
+
+$('share-btn').addEventListener('click', async () => {
+  if (!BOT_LINK) return;
+  await copyText(BOT_LINK);
+  if (tg.HapticFeedback) tg.HapticFeedback.notificationOccurred('success');
+  showToast('Посилання скопійовано ✓');
+});
+
+// ---- Feedback ----
+// The Mini App is launched from an inline button, so Telegram's sendData() is
+// unavailable — POST to our Flask /api/feedback instead, which forwards the
+// message (with the signed initData identifying the user) to the private group.
+function openFeedback() {
+  $('fb-text').value = '';
+  $('fb-overlay').classList.add('show');
+  $('fb-modal').classList.add('show');
+  setTimeout(() => $('fb-text').focus(), 100);
+}
+function closeFeedback() {
+  $('fb-overlay').classList.remove('show');
+  $('fb-modal').classList.remove('show');
+}
+$('feedback-btn').addEventListener('click', openFeedback);
+$('fb-cancel').addEventListener('click', closeFeedback);
+$('fb-overlay').addEventListener('click', closeFeedback);
+
+$('fb-send').addEventListener('click', async () => {
+  const text = $('fb-text').value.trim();
+  if (!text) { $('fb-text').focus(); return; }
+  const btn = $('fb-send');
+  btn.disabled = true;
+  try {
+    const res = await fetch('/api/feedback', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text, initData: tg.initData || '' }),
+    });
+    if (!res.ok) throw new Error('bad status');
+    closeFeedback();
+    if (tg.HapticFeedback) tg.HapticFeedback.notificationOccurred('success');
+    showToast('Дякуємо за відгук ✓');
+  } catch (_) {
+    if (tg.HapticFeedback) tg.HapticFeedback.notificationOccurred('error');
+    showToast('Не вдалося надіслати 😕');
+  } finally {
+    btn.disabled = false;
+  }
+});
 
 // Init
 (async () => {
