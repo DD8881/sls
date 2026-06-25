@@ -22,7 +22,13 @@ let state = {
   userLat: null,
   userLng: null,
   geoSorted: false,
+  geoCity: null,
+  geoHint: null,  // contextual message shown when a geo request fails
 };
+
+const GEO_DENIED_HINT = 'Доступ до геолокації вимкнено. Увімкніть його для Telegram у Налаштуваннях — і застосунок визначить ваше місто та найближчі магазини.';
+const GEO_FIX_TIMEOUT = 3000;      // give up fast when waiting on a location fix
+const GEO_PROMPT_TIMEOUT = 25000;  // but allow time while a permission dialog is open
 
 const ITEMS_PER_PAGE = 30;
 const CHAIN_LABELS = { silpo: 'Silpo', novus: 'Novus', metro: 'Metro', varus: 'Varus', atb: 'АТБ', fora: 'Fora', auchan: 'Ашан' };
@@ -59,22 +65,34 @@ function renderCityDropdown() {
     dd.innerHTML = '<div class="city-option">Немає міст</div>';
     return;
   }
-  let html = '';
-  for (const c of state.cities) {
+  // Alphabetical (uk), with the geolocated city floated to the top.
+  const ordered = [...state.cities].sort((a, b) => a.city.localeCompare(b.city, 'uk'));
+  if (state.geoCity) {
+    const i = ordered.findIndex(c => c.city === state.geoCity);
+    if (i > 0) ordered.unshift(ordered.splice(i, 1)[0]);
+  }
+  // Geo button (mirrors the store sheet's "За відстанню"): shows the detected
+  // city, or offers to detect it.
+  const geoActive = !!state.geoCity;
+  const geoLabel = geoActive
+    ? `📍 Поряд: ${escapeHtml(state.geoCity)} ✓`
+    : '📍 Визначити моє місто';
+  let html = `<div class="city-geo-row">
+    <button type="button" class="geo-sort-btn ${geoActive ? 'active' : ''}" id="city-geo-btn">${geoLabel}</button>
+  </div>`;
+  if (state.geoHint) html += `<div class="geo-hint">📍 ${escapeHtml(state.geoHint)}</div>`;
+  for (const c of ordered) {
     const active = state.city === c.city ? 'active' : '';
+    const isGeo = state.geoCity === c.city;
     html += `<div class="city-option ${active}" data-city="${escapeHtml(c.city)}">
-      <span>${escapeHtml(c.city)}</span><span class="city-count">${c.store_cnt} маг.</span>
+      <span>${isGeo ? '📍 ' : ''}${escapeHtml(c.city)}</span><span class="city-count">${c.store_cnt} маг.</span>
     </div>`;
   }
   dd.innerHTML = html;
+  const gbtn = $('city-geo-btn');
+  if (gbtn) gbtn.onclick = (e) => { e.stopPropagation(); requestCityGeo(); };
   dd.querySelectorAll('.city-option').forEach(opt => {
-    opt.onclick = () => {
-      state.city = opt.dataset.city;
-      localStorage.setItem('sls_city', state.city);
-      closeCityDD();
-      renderCityBtn();
-      loadCityData();
-    };
+    opt.onclick = () => selectCity(opt.dataset.city, true);  // explicit pick → geo won't override
   });
 }
 
@@ -82,7 +100,7 @@ function toggleCityDD() {
   cityOpen = !cityOpen;
   $('city-btn').classList.toggle('open', cityOpen);
   $('city-dropdown').classList.toggle('open', cityOpen);
-  if (cityOpen) renderCityDropdown();
+  if (cityOpen) { state.geoHint = null; renderCityDropdown(); }
 }
 
 function closeCityDD() {
@@ -172,6 +190,7 @@ function renderStoreFilter() {
 }
 
 function openStoreSheet() {
+  state.geoHint = null;
   $('sheet-overlay').classList.add('open');
   $('store-sheet').classList.add('open');
   $('sheet-search-input').value = '';
@@ -198,41 +217,125 @@ function formatDist(km) {
   return km.toFixed(1) + ' км';
 }
 
+// Resolve the user's coordinates via Telegram's LocationManager (preferred) or
+// the browser geolocation API. Caches the result so repeat calls don't re-prompt.
+// opts.prompt: if false (default), never trigger the system permission prompt —
+// only resolve when access is already granted (used for the silent auto-detect
+// on open). Always fails after a timeout so the UI never hangs.
+function getUserPosition(onOk, onErr, opts) {
+  opts = opts || {};
+  if (state.userLat != null) { onOk(state.userLat, state.userLng); return; }
+
+  let done = false, timer;
+  const arm = (ms) => { clearTimeout(timer); timer = setTimeout(fail, ms); };
+  const ok = (lat, lng) => { if (done) return; done = true; clearTimeout(timer); state.userLat = lat; state.userLng = lng; onOk(lat, lng); };
+  const fail = () => { if (done) return; done = true; clearTimeout(timer); onErr && onErr(); };
+  // Access not granted and can't be (re)prompted inline → caller should guide
+  // the user to settings. Falls back to onErr when no onDenied is given.
+  const denied = () => { if (done) return; done = true; clearTimeout(timer); (opts.onDenied || onErr) && (opts.onDenied || onErr)(); };
+  arm(GEO_FIX_TIMEOUT);  // fast give-up unless a permission dialog opens (re-armed below)
+
+  const lm = tg.LocationManager;
+  if (lm) {
+    lm.init(() => {
+      if (lm.isAccessGranted) {
+        lm.getLocation((loc) => loc ? ok(loc.latitude, loc.longitude) : fail());
+      } else if (opts.prompt) {
+        // Explicit tap: let Telegram show its own prompt (or, when iOS-level
+        // location is off, its "enable in Settings" alert with a Параметри
+        // button). The user needs time to decide, so extend the timeout.
+        arm(GEO_PROMPT_TIMEOUT);
+        lm.getLocation((loc) => loc ? ok(loc.latitude, loc.longitude) : denied());
+      } else {
+        fail();  // silent auto-detect: never prompt
+      }
+    });
+  } else if ('geolocation' in navigator) {
+    const getPos = (ms) => navigator.geolocation.getCurrentPosition(
+      (pos) => ok(pos.coords.latitude, pos.coords.longitude), fail,
+      { enableHighAccuracy: false, timeout: ms }
+    );
+    if (!opts.prompt && navigator.permissions) {
+      navigator.permissions.query({ name: 'geolocation' })
+        .then(p => p.state === 'granted' ? getPos(GEO_FIX_TIMEOUT) : fail()).catch(fail);
+    } else {
+      arm(GEO_PROMPT_TIMEOUT);  // the browser may show its own permission prompt
+      getPos(GEO_PROMPT_TIMEOUT);
+    }
+  } else {
+    fail();
+  }
+}
+
+// Nearest city (by centroid) within 50 km, or null.
+const GEO_CITY_MAX_KM = 50;
+function nearestCity(lat, lng) {
+  let best = null, bestD = Infinity;
+  for (const c of state.cities) {
+    if (c.lat == null || c.lng == null) continue;
+    const d = haversineKm(lat, lng, c.lat, c.lng);
+    if (d < bestD) { bestD = d; best = c.city; }
+  }
+  return (best && bestD <= GEO_CITY_MAX_KM) ? best : null;
+}
+
+function selectCity(city, isManual) {
+  state.geoHint = null;
+  state.city = city;
+  localStorage.setItem('sls_city', city);
+  if (isManual) localStorage.setItem('sls_city_manual', '1');
+  else localStorage.removeItem('sls_city_manual');  // geo selection follows the user
+  closeCityDD();
+  renderCityBtn();
+  loadCityData();
+}
+
+// Auto on open: float the user's city to the top and select it unless they
+// picked one manually. Best-effort, silent.
+function detectCityByGeo() {
+  if (!state.cities.length) return;
+  getUserPosition((lat, lng) => {
+    const best = nearestCity(lat, lng);
+    if (!best) return;
+    state.geoCity = best;
+    if (cityOpen) renderCityDropdown();
+    if (!localStorage.getItem('sls_city_manual') && state.city !== best) {
+      selectCity(best, false);
+    }
+  });
+}
+
+// Manual trigger from the "📍" button in the city dropdown.
+function requestCityGeo() {
+  if (state.geoCity) { selectCity(state.geoCity, false); return; }
+  const btn = $('city-geo-btn');
+  if (btn) { btn.textContent = '...'; btn.disabled = true; }
+  getUserPosition(
+    (lat, lng) => {
+      const best = nearestCity(lat, lng);
+      if (best) { state.geoCity = best; selectCity(best, false); }
+      else cityGeoFail('Поблизу не знайдено міст зі знижками.');
+    },
+    () => cityGeoFail(GEO_DENIED_HINT),
+    { prompt: true, onDenied: () => cityGeoFail(GEO_DENIED_HINT) }
+  );
+}
+function cityGeoFail(msg) {
+  state.geoHint = msg;
+  if (cityOpen) renderCityDropdown();  // restores the button + shows the hint
+}
+
 function requestGeoSort() {
   const btn = $('geo-sort-btn');
   if (!btn) return;
   btn.textContent = '...';
   btn.disabled = true;
-
-  const onSuccess = (lat, lng) => {
-    state.userLat = lat;
-    state.userLng = lng;
-    state.geoSorted = true;
-    renderStoreList($('sheet-search-input').value.trim());
-  };
-
-  const onError = () => {
-    btn.textContent = 'Немає доступу';
-    setTimeout(() => { btn.textContent = 'За відстанню'; btn.disabled = false; }, 2000);
-  };
-
-  if (tg.LocationManager) {
-    tg.LocationManager.init(() => {
-      if (!tg.LocationManager.isLocationAvailable) { onError(); return; }
-      tg.LocationManager.getLocation((loc) => {
-        if (loc) onSuccess(loc.latitude, loc.longitude);
-        else onError();
-      });
-    });
-  } else if ('geolocation' in navigator) {
-    navigator.geolocation.getCurrentPosition(
-      (pos) => onSuccess(pos.coords.latitude, pos.coords.longitude),
-      onError,
-      { enableHighAccuracy: false, timeout: 10000 }
-    );
-  } else {
-    onError();
-  }
+  const onFail = () => { state.geoHint = GEO_DENIED_HINT; renderStoreList($('sheet-search-input').value.trim()); };
+  getUserPosition(
+    () => { state.geoHint = null; state.geoSorted = true; renderStoreList($('sheet-search-input').value.trim()); },
+    onFail,
+    { prompt: true, onDenied: onFail }
+  );
 }
 
 function renderStoreList(query) {
@@ -262,6 +365,7 @@ function renderStoreList(query) {
     <div class="sheet-store-info"><span class="sheet-store-name">Всі магазини</span></div>
     ${geoAvailable ? `<button type="button" class="geo-sort-btn ${geoActive ? 'active' : ''}" id="geo-sort-btn">${geoActive ? 'За відстанню ✓' : 'За відстанню'}</button>` : ''}
   </div>`;
+  if (state.geoHint) html += `<div class="geo-hint">📍 ${escapeHtml(state.geoHint)}</div>`;
   for (const s of stores) {
     const active = state.store === s.id ? 'active' : '';
     const chainLabel = CHAIN_LABELS[s.chain] || s.chain;
@@ -683,4 +787,5 @@ $('load-more-btn').addEventListener('click', () => appendProducts());
   if (state.city) {
     await loadCityData();
   }
+  detectCityByGeo();  // float the user's city to the top (and select it if none chosen)
 })();
