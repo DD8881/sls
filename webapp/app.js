@@ -58,9 +58,16 @@ function formatPromoEnd(s) {
 }
 
 async function fetchJSON(path) {
-  const res = await fetch('/data/' + path);
-  if (!res.ok) return null;
-  return res.json();
+  try {
+    // ngrok-skip-browser-warning: free ngrok serves an HTML interstitial to
+    // browser-like clients without it, which would break JSON parsing in the
+    // Telegram webview. Harmless on a real host (unknown header is ignored).
+    const res = await fetch('/data/' + path, { headers: { 'ngrok-skip-browser-warning': '1' } });
+    if (!res.ok) return null;
+    return await res.json();
+  } catch (e) {
+    return null;
+  }
 }
 
 function escapeHtml(t) {
