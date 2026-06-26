@@ -7,8 +7,13 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-echo "==> Regenerating static JSON from discounts.db"
-python3 generate_static.py
+# Prefer the project venv (Python 3.11; generate_static.py needs 3.10+ for
+# `str | None`). Falls back to python3 so launchd/cron work without activation.
+PYTHON="./.venv/bin/python"
+[ -x "$PYTHON" ] || PYTHON="python3"
+
+echo "==> Regenerating static JSON from discounts.db ($PYTHON)"
+"$PYTHON" generate_static.py
 
 echo "==> Assembling ./public"
 rm -rf public
