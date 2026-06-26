@@ -158,15 +158,11 @@ export default {
       return handleWebhook(request, env);
     }
 
-    // Everything else -> static assets (Mini App shell + /static + /data).
-    // The shell must never be cached, so a bumped ?v= asset URL is always picked
-    // up on reopen (matches web_server.py's index() no-store behaviour).
-    if (url.pathname === "/" || url.pathname === "/index.html") {
-      const resp = await env.ASSETS.fetch(request);
-      const out = new Response(resp.body, resp);
-      out.headers.set("Cache-Control", "no-store");
-      return out;
-    }
+    // Everything else -> static assets (Mini App shell + /static + /data),
+    // served directly by the asset layer (the Worker isn't invoked for paths
+    // that match a file). The shell's no-store header — so a bumped ?v= asset
+    // URL is always picked up on reopen — comes from public/_headers, written
+    // by deploy.sh, since this handler never runs for "/".
     return env.ASSETS.fetch(request);
   },
 };

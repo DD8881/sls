@@ -22,6 +22,10 @@ cp webapp/index.html public/index.html
 cp webapp/app.js webapp/style.css webapp/logo.png public/static/
 # Copy data, but skip the pre-gzipped twins — Cloudflare compresses on the fly.
 rsync -a --exclude='*.gz' data/ public/data/
+# Never cache the Mini App shell, so a bumped ?v= asset URL is picked up on
+# reopen in the Telegram webview. Assets are served bypassing the Worker, so
+# this header must come from the asset layer's _headers file, not worker code.
+printf '/\n  Cache-Control: no-store\n/index.html\n  Cache-Control: no-store\n' > public/_headers
 
 echo "==> Deploying to Cloudflare"
 npx wrangler deploy
