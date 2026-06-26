@@ -1,0 +1,23 @@
+{
+  // Cloudflare Worker that serves the Mini App (static assets) + /api/feedback
+  // + the Telegram bot webhook. Deploy with ./deploy.sh.
+  "name": "sls",
+  "main": "worker/index.js",
+  "compatibility_date": "2025-06-01",
+
+  // Static assets assembled by deploy.sh into ./public (Mini App + data/*.json).
+  // The binding lets the Worker fall through to assets for non-API routes.
+  "assets": {
+    "directory": "./public",
+    "binding": "ASSETS"
+  },
+
+  "vars": {
+    // This Worker's own public URL — used as the Mini App URL in the /start button.
+    // Set to your workers.dev URL (or custom domain) after the first deploy.
+    "WEBAPP_URL": "https://sls.dolzhenkovdanil.workers.dev/"
+  }
+
+  // Secrets (NOT here — set via `wrangler secret put`):
+  //   BOT_TOKEN, FEEDBACK_CHAT_ID, WEBHOOK_SECRET
+}

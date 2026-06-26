@@ -16,6 +16,11 @@ __pycache__/
 # Generated static output (~1GB; rebuild via generate_static.py)
 data/
 
+# Cloudflare Worker build/deploy artifacts
+public/
+node_modules/
+.wrangler/
+
 # Editor / tooling
 .claude/
 .DS_Store

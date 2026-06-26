@@ -2,3 +2,5 @@ python-dotenv==1.2.2
 python-telegram-bot==22.7
 requests==2.34.2
 curl_cffi==0.15.0
+# Local dev only: web_server.py (static + /api/feedback). Production uses the Worker.
+Flask==3.1.2
