@@ -126,11 +126,25 @@ async function handleWebhook(request, env) {
 
   if (cmd === "/start") {
     if (env.WEBAPP_URL) {
-      await sendMessage(env, chatId, "Натисніть кнопку щоб переглянути знижки:", {
-        reply_markup: {
-          inline_keyboard: [[{ text: "🛒 Відкрити знижки", web_app: { url: env.WEBAPP_URL } }]],
+      const first = (message.from && message.from.first_name) || "";
+      const hi = first
+        ? `👋 Вітаємо, ${first.replace(/[<>&]/g, "")}!`
+        : "👋 Вітаємо!";
+      await sendMessage(
+        env,
+        chatId,
+        `${hi}\n\n` +
+          "🛒 <b>Sales UA</b> — усі знижки супермаркетів України в одному застосунку.\n\n" +
+          "📍 Ваше місто й найближчі магазини\n" +
+          "🔍 Пошук товарів одразу за всіма категоріями\n\n" +
+          "Тисніть кнопку нижче, щоб почати 👇",
+        {
+          parse_mode: "HTML",
+          reply_markup: {
+            inline_keyboard: [[{ text: "🛒 Відкрити знижки", web_app: { url: env.WEBAPP_URL } }]],
+          },
         },
-      });
+      );
     } else {
       await sendMessage(env, chatId, "Налаштуйте WEBAPP_URL для використання бота.");
     }
