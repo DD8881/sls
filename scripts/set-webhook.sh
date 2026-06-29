@@ -21,5 +21,5 @@ SECRET="${2:?usage: set-webhook.sh <worker-base-url> <webhook-secret>}"
 curl -fsS "https://api.telegram.org/bot${BOT_TOKEN}/setWebhook" \
   --data-urlencode "url=${BASE_URL%/}/webhook" \
   --data-urlencode "secret_token=${SECRET}" \
-  --data-urlencode 'allowed_updates=["message"]'
+  --data-urlencode 'allowed_updates=["message","callback_query"]'
 echo
