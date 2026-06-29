@@ -32,7 +32,7 @@ let state = {
   geoHint: null,  // contextual message shown when a geo request fails
 };
 
-const GEO_DENIED_HINT = 'Доступ до геолокації вимкнено. Увімкніть його для Telegram у Налаштуваннях — і застосунок визначить ваше місто та найближчі магазини.';
+const GEO_DENIED_HINT = 'Доступ до геолокації не надано. Дозвольте його для цього застосунку — і він визначить ваше місто та найближчі магазини.';
 const GEO_FIX_TIMEOUT = 3000;      // give up fast when waiting on a location fix
 const GEO_PROMPT_TIMEOUT = 25000;  // but allow time while a permission dialog is open
 
@@ -300,19 +300,41 @@ function getUserPosition(onOk, onErr, opts) {
 
   const lm = tg.LocationManager;
   if (lm) {
-    lm.init(() => {
-      if (lm.isAccessGranted) {
-        lm.getLocation((loc) => loc ? ok(loc.latitude, loc.longitude) : fail());
-      } else if (opts.prompt) {
-        // Explicit tap: let Telegram show its own prompt (or, when iOS-level
-        // location is off, its "enable in Settings" alert with a Параметри
-        // button). The user needs time to decide, so extend the timeout.
-        arm(GEO_PROMPT_TIMEOUT);
+    // Act on the manager once it's initialized. Telegram's init() callback only
+    // fires for the FIRST init() that triggers the check — a second init() after
+    // isInited is true returns silently and never calls back. We init silently on
+    // app open, so by the time the user taps, isInited is already true and a
+    // re-init would hang forever. Branch on isInited instead of always re-initing.
+    const useLm = () => {
+      if (!lm.isLocationAvailable) {
+        // OS-level location for Telegram is off, or the device can't provide it.
+        denied();
+      } else if (lm.isAccessGranted) {
+        arm(GEO_FIX_TIMEOUT);
         lm.getLocation((loc) => loc ? ok(loc.latitude, loc.longitude) : denied());
+      } else if (opts.prompt) {
+        // Explicit tap. The user needs time to decide, so extend the timeout.
+        arm(GEO_PROMPT_TIMEOUT);
+        if (lm.isAccessRequested) {
+          // Already asked once and declined at the Mini App level (separate from
+          // the OS-level Telegram permission). getLocation() won't re-prompt now —
+          // open Telegram's own per-app location settings instead.
+          lm.openSettings();
+          denied();
+        } else {
+          // First time: getLocation() triggers Telegram's own permission prompt.
+          lm.getLocation((loc) => loc ? ok(loc.latitude, loc.longitude) : denied());
+        }
       } else {
         fail();  // silent auto-detect: never prompt
       }
-    });
+    };
+    if (lm.isInited) {
+      useLm();
+    } else {
+      arm(opts.prompt ? GEO_PROMPT_TIMEOUT : GEO_FIX_TIMEOUT);  // first init may wait on the native client
+      lm.init(useLm);
+    }
   } else if ('geolocation' in navigator) {
     const getPos = (ms) => navigator.geolocation.getCurrentPosition(
       (pos) => ok(pos.coords.latitude, pos.coords.longitude), fail,
