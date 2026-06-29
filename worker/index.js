@@ -101,12 +101,77 @@ async function handleFeedback(request, env) {
   return json({ ok: true });
 }
 
-function sendMessage(env, chatId, text, extra = {}) {
-  return fetch(`${TG_API}/bot${env.BOT_TOKEN}/sendMessage`, {
+// Thin wrapper over the Bot API. Returns the parsed JSON ({ok, result}|{ok:false,...}).
+async function tg(env, method, body) {
+  const resp = await fetch(`${TG_API}/bot${env.BOT_TOKEN}/${method}`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ chat_id: chatId, text, ...extra }),
+    body: JSON.stringify(body),
   });
+  return resp.json().catch(() => ({ ok: false }));
+}
+
+function sendMessage(env, chatId, text, extra = {}) {
+  return tg(env, "sendMessage", { chat_id: chatId, text, ...extra });
+}
+
+// Forced-subscription gate. Returns true if the user is a member of env.CHANNEL.
+//
+// Requires the bot to be an ADMINISTRATOR of the channel (otherwise getChatMember
+// errors and we fail OPEN — a misconfigured/absent gate must never lock everyone
+// out of the bot). If env.CHANNEL is unset the gate is disabled (returns true).
+async function isSubscribed(env, userId) {
+  if (!env.CHANNEL) return true; // gate disabled
+  const r = await tg(env, "getChatMember", { chat_id: env.CHANNEL, user_id: userId });
+  if (!r || !r.ok || !r.result) return true; // can't verify -> fail open
+  const status = r.result.status;
+  if (status === "creator" || status === "administrator" || status === "member") return true;
+  if (status === "restricted") return r.result.is_member === true;
+  return false; // left | kicked
+}
+
+// Public t.me link to the channel: explicit CHANNEL_INVITE wins (needed for
+// private channels), else derive from an @username CHANNEL.
+function channelUrl(env) {
+  if (env.CHANNEL_INVITE) return env.CHANNEL_INVITE;
+  if (env.CHANNEL && env.CHANNEL.startsWith("@")) return `https://t.me/${env.CHANNEL.slice(1)}`;
+  return null;
+}
+
+function openWebappMessage(env, firstName) {
+  const first = (firstName || "").replace(/[<>&]/g, "");
+  const hi = first ? `👋 Вітаємо, ${first}!` : "👋 Вітаємо!";
+  return {
+    text:
+      `${hi}\n\n` +
+      "🛒 <b>Sales UA</b> — усі знижки супермаркетів України в одному застосунку.\n\n" +
+      "📍 Ваше місто й найближчі магазини\n" +
+      "🔍 Пошук товарів одразу за всіма категоріями\n\n" +
+      "Тисніть кнопку нижче, щоб почати 👇",
+    extra: {
+      parse_mode: "HTML",
+      reply_markup: {
+        inline_keyboard: [[{ text: "🛒 Відкрити знижки", web_app: { url: env.WEBAPP_URL } }]],
+      },
+    },
+  };
+}
+
+// Prompt shown to users who haven't joined the channel yet: a link to the
+// channel + an inline "I subscribed" button that re-checks via callback_query.
+function subscribePrompt(env) {
+  const url = channelUrl(env);
+  const rows = [];
+  if (url) rows.push([{ text: "📢 Підписатися на канал", url }]);
+  rows.push([{ text: "✅ Я підписався", callback_data: "check_sub" }]);
+  return {
+    text:
+      "🔒 <b>Майже готово!</b>\n\n" +
+      "Щоб користуватися застосунком, спершу підпишіться на наш канал — " +
+      "там анонси найкращих знижок.\n\n" +
+      "Після підписки тисніть «✅ Я підписався».",
+    extra: { parse_mode: "HTML", reply_markup: { inline_keyboard: rows } },
+  };
 }
 
 // Telegram bot webhook. Static-only: no DB. Mirrors the surviving Python handlers
@@ -117,7 +182,39 @@ async function handleWebhook(request, env) {
     if (got !== env.WEBHOOK_SECRET) return new Response("forbidden", { status: 403 });
   }
   const update = await request.json().catch(() => null);
-  const message = update && update.message;
+  if (!update) return json({ ok: true });
+
+  // Inline "✅ Я підписався" button -> re-check membership.
+  if (update.callback_query) {
+    const cq = update.callback_query;
+    if (cq.data === "check_sub") {
+      const userId = cq.from && cq.from.id;
+      const msg = cq.message;
+      if (await isSubscribed(env, userId)) {
+        await tg(env, "answerCallbackQuery", { callback_query_id: cq.id });
+        if (msg && env.WEBAPP_URL) {
+          const m = openWebappMessage(env, cq.from && cq.from.first_name);
+          await tg(env, "editMessageText", {
+            chat_id: msg.chat.id,
+            message_id: msg.message_id,
+            text: m.text,
+            ...m.extra,
+          });
+        }
+      } else {
+        await tg(env, "answerCallbackQuery", {
+          callback_query_id: cq.id,
+          text: "Ще не бачу підписки 🙈 Підпишіться на канал і спробуйте ще раз.",
+          show_alert: true,
+        });
+      }
+    } else {
+      await tg(env, "answerCallbackQuery", { callback_query_id: cq.id });
+    }
+    return json({ ok: true });
+  }
+
+  const message = update.message;
   const text = message && message.text;
   if (!message || !text) return json({ ok: true });
 
@@ -125,28 +222,14 @@ async function handleWebhook(request, env) {
   const cmd = text.split(/\s+/)[0].split("@")[0];
 
   if (cmd === "/start") {
-    if (env.WEBAPP_URL) {
-      const first = (message.from && message.from.first_name) || "";
-      const hi = first
-        ? `👋 Вітаємо, ${first.replace(/[<>&]/g, "")}!`
-        : "👋 Вітаємо!";
-      await sendMessage(
-        env,
-        chatId,
-        `${hi}\n\n` +
-          "🛒 <b>Sales UA</b> — усі знижки супермаркетів України в одному застосунку.\n\n" +
-          "📍 Ваше місто й найближчі магазини\n" +
-          "🔍 Пошук товарів одразу за всіма категоріями\n\n" +
-          "Тисніть кнопку нижче, щоб почати 👇",
-        {
-          parse_mode: "HTML",
-          reply_markup: {
-            inline_keyboard: [[{ text: "🛒 Відкрити знижки", web_app: { url: env.WEBAPP_URL } }]],
-          },
-        },
-      );
-    } else {
+    if (!env.WEBAPP_URL) {
       await sendMessage(env, chatId, "Налаштуйте WEBAPP_URL для використання бота.");
+    } else if (await isSubscribed(env, message.from && message.from.id)) {
+      const m = openWebappMessage(env, message.from && message.from.first_name);
+      await sendMessage(env, chatId, m.text, m.extra);
+    } else {
+      const p = subscribePrompt(env);
+      await sendMessage(env, chatId, p.text, p.extra);
     }
   } else if (cmd === "/help") {
     await sendMessage(

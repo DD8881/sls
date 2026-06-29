@@ -15,7 +15,14 @@
   "vars": {
     // This Worker's own public URL — used as the Mini App URL in the /start button.
     // Set to your workers.dev URL (or custom domain) after the first deploy.
-    "WEBAPP_URL": "https://sls.dolzhenkovdanil.workers.dev/"
+    "WEBAPP_URL": "https://sls.dolzhenkovdanil.workers.dev/",
+
+    // Forced-subscription gate. The bot must be an ADMINISTRATOR of this channel.
+    // Set CHANNEL to the channel's @username (public) or its -100… id (private).
+    // For a private channel also set CHANNEL_INVITE to a t.me invite link.
+    // Leave CHANNEL empty/removed to disable the gate.
+    "CHANNEL": "@sales_ua_news"
+    // "CHANNEL_INVITE": "https://t.me/+xxxxxxxx"
   }
 
   // Secrets (NOT here — set via `wrangler secret put`):
