@@ -7,6 +7,7 @@ import requests
 
 import config
 from scrapers.base import BaseScraper, ScrapedCategory, ScrapedProduct, StoreInfo
+from scrapers.http import make_session
 
 log = logging.getLogger(__name__)
 
@@ -26,7 +27,7 @@ HEADERS = {
 }
 
 CITY_WORKERS = 8
-PAGE_WORKERS = 5
+PAGE_WORKERS = 3  # fora drops connections under load; keep per-store page fan-out small
 
 # Strip settlement-type prefixes so cities match the rest of the app ("м. Київ" -> "Київ").
 _CITY_PREFIX = re.compile(r"^(?:м|с|смт|сел|сщ)\.?\s+", re.IGNORECASE)
@@ -45,8 +46,7 @@ class ForaScraper(BaseScraper):
     def _get_session(self) -> requests.Session:
         s = getattr(self._local, "session", None)
         if s is None:
-            s = requests.Session()
-            s.headers.update(HEADERS)
+            s = make_session(HEADERS)
             self._local.session = s
         return s
 

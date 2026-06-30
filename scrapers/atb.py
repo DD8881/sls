@@ -8,6 +8,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from curl_cffi import requests as creq
 
 from scrapers.base import BaseScraper, ScrapedCategory, ScrapedProduct, StoreInfo
+from scrapers.http import REQUEST_GATE
 
 log = logging.getLogger(__name__)
 
@@ -73,7 +74,8 @@ class ATBScraper(BaseScraper):
         last_err = None
         for attempt in range(RETRIES):
             try:
-                resp = self._session().get(url, timeout=TIMEOUT)
+                with REQUEST_GATE:
+                    resp = self._session().get(url, timeout=TIMEOUT)
                 resp.raise_for_status()
                 return resp.text
             except Exception as e:

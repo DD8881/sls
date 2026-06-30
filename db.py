@@ -5,7 +5,11 @@ from datetime import datetime, timezone
 
 import config
 
-_SCHEMA = """
+# Tables carry the UNIQUE constraints (needed for the ON CONFLICT upserts and to
+# collapse intra-store duplicates). The secondary indexes below are split out so
+# a from-scratch build can defer them: creating each index once over the finished
+# data is far cheaper than maintaining it across millions of incremental inserts.
+_SCHEMA_TABLES = """
 CREATE TABLE IF NOT EXISTS stores (
     id          TEXT PRIMARY KEY,
     chain       TEXT NOT NULL,
@@ -50,7 +54,9 @@ CREATE TABLE IF NOT EXISTS store_products (
     scraped_at      TEXT NOT NULL,
     UNIQUE(product_id, store_id)
 );
+"""
 
+_SCHEMA_INDEXES = """
 CREATE INDEX IF NOT EXISTS idx_products_chain ON products(chain);
 CREATE INDEX IF NOT EXISTS idx_products_unified ON products(unified_category);
 CREATE INDEX IF NOT EXISTS idx_products_external ON products(chain, external_id);
@@ -60,13 +66,50 @@ CREATE INDEX IF NOT EXISTS idx_sp_discount ON store_products(discount_pct DESC);
 CREATE INDEX IF NOT EXISTS idx_stores_city ON stores(city);
 """
 
+_SCHEMA = _SCHEMA_TABLES + _SCHEMA_INDEXES
 
-def get_connection() -> sqlite3.Connection:
-    conn = sqlite3.connect(config.DATABASE_PATH)
+
+def get_connection(check_same_thread: bool = True) -> sqlite3.Connection:
+    """Open the SQLite database.
+
+    Pass ``check_same_thread=False`` to share one connection across threads (the
+    scraper runs all chains concurrently and serialises every write behind a
+    single lock). ``busy_timeout`` keeps a concurrent reader — e.g. the bot — from
+    failing instantly if it touches the DB mid-write.
+    """
+    conn = sqlite3.connect(config.DATABASE_PATH, check_same_thread=check_same_thread)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
+    conn.execute("PRAGMA busy_timeout=30000")
     return conn
+
+
+def get_build_connection(path: str) -> sqlite3.Connection:
+    """Open a throwaway DB for a from-scratch full scrape, tuned for bulk writes.
+
+    Nothing reads this file until it is atomically swapped into place, and on any
+    failure it is simply discarded — so durability pragmas can be turned off:
+    journal_mode=OFF / synchronous=OFF remove all fsync + rollback-journal work.
+    Secondary indexes are created later (see create_indexes); only the tables'
+    UNIQUE constraints are live during the load.
+    """
+    conn = sqlite3.connect(path, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=OFF")
+    conn.execute("PRAGMA synchronous=OFF")
+    conn.execute("PRAGMA foreign_keys=OFF")
+    conn.execute("PRAGMA temp_store=MEMORY")
+    conn.execute("PRAGMA cache_size=-65536")  # ~64 MB page cache
+    return conn
+
+
+def create_tables(conn):
+    conn.executescript(_SCHEMA_TABLES)
+
+
+def create_indexes(conn):
+    conn.executescript(_SCHEMA_INDEXES)
 
 
 def init_db():
@@ -106,40 +149,51 @@ def upsert_categories(conn, categories):
         )
 
 
-def upsert_products(conn, products, store_id: str):
+def upsert_products(conn, products, store_id: str, id_cache: dict | None = None):
     """Upsert products and link them to a store.
 
     Batched: one executemany for products, a chunked id lookup, then one
     executemany for store_products. Avoids the per-product SELECT round-trip,
     which was the bottleneck for large stores (thousands of promo items).
+
+    ``id_cache`` is an optional per-chain {external_id: product_id} map shared
+    across that chain's stores. Promo products are largely the same across a
+    chain's branches, so passing it skips re-upserting (and re-resolving the id
+    of) a product already written this run — eliminating the bulk of the
+    products-table writes and id lookups. Must only be used while writes for that
+    chain are serialised (it is mutated in place).
     """
     if not products:
         return
     now = datetime.now(timezone.utc).isoformat()
+    if id_cache is None:
+        id_cache = {}
 
-    conn.executemany(
-        "INSERT INTO products (external_id, chain, category_slug, title, image_url, url, unit) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?) "
-        "ON CONFLICT(chain, external_id) DO UPDATE SET "
-        "title=excluded.title, image_url=excluded.image_url, url=excluded.url, "
-        "unit=excluded.unit, category_slug=excluded.category_slug",
-        [(p.external_id, p.chain, p.category_slug, p.title,
-          p.image_url, p.url, p.unit) for p in products],
-    )
+    # Only products not already written this run (for this chain) need upserting.
+    new_products = [p for p in products if p.external_id not in id_cache]
+    if new_products:
+        conn.executemany(
+            "INSERT INTO products (external_id, chain, category_slug, title, image_url, url, unit) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(chain, external_id) DO UPDATE SET "
+            "title=excluded.title, image_url=excluded.image_url, url=excluded.url, "
+            "unit=excluded.unit, category_slug=excluded.category_slug",
+            [(p.external_id, p.chain, p.category_slug, p.title,
+              p.image_url, p.url, p.unit) for p in new_products],
+        )
 
-    # Resolve product ids in bulk (all products in a batch share one chain).
-    chain = products[0].chain
-    ext_ids = [p.external_id for p in products]
-    id_map: dict[str, int] = {}
-    for i in range(0, len(ext_ids), 500):
-        chunk = ext_ids[i:i + 500]
-        placeholders = ",".join("?" * len(chunk))
-        rows = conn.execute(
-            f"SELECT external_id, id FROM products WHERE chain = ? AND external_id IN ({placeholders})",
-            [chain, *chunk],
-        ).fetchall()
-        for ext_id, pid in rows:
-            id_map[ext_id] = pid
+        # Resolve ids for just the newly-inserted products (all share one chain).
+        chain = new_products[0].chain
+        ext_ids = [p.external_id for p in new_products]
+        for i in range(0, len(ext_ids), 500):
+            chunk = ext_ids[i:i + 500]
+            placeholders = ",".join("?" * len(chunk))
+            rows = conn.execute(
+                f"SELECT external_id, id FROM products WHERE chain = ? AND external_id IN ({placeholders})",
+                [chain, *chunk],
+            ).fetchall()
+            for ext_id, pid in rows:
+                id_cache[ext_id] = pid
 
     conn.executemany(
         "INSERT INTO store_products (product_id, store_id, price, old_price, "
@@ -149,7 +203,7 @@ def upsert_products(conn, products, store_id: str):
         "price=excluded.price, old_price=excluded.old_price, "
         "discount_pct=excluded.discount_pct, in_stock=excluded.in_stock, "
         "promo_end_date=excluded.promo_end_date, scraped_at=excluded.scraped_at",
-        [(id_map[p.external_id], store_id, p.price, p.old_price,
+        [(id_cache[p.external_id], store_id, p.price, p.old_price,
           p.discount_pct, int(p.in_stock), p.promo_end_date, now) for p in products],
     )
 
