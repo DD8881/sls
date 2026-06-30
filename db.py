@@ -61,11 +61,19 @@ CREATE INDEX IF NOT EXISTS idx_stores_city ON stores(city);
 """
 
 
-def get_connection() -> sqlite3.Connection:
-    conn = sqlite3.connect(config.DATABASE_PATH)
+def get_connection(check_same_thread: bool = True) -> sqlite3.Connection:
+    """Open the SQLite database.
+
+    Pass ``check_same_thread=False`` to share one connection across threads (the
+    scraper runs all chains concurrently and serialises every write behind a
+    single lock). ``busy_timeout`` keeps a concurrent reader — e.g. the bot — from
+    failing instantly if it touches the DB mid-write.
+    """
+    conn = sqlite3.connect(config.DATABASE_PATH, check_same_thread=check_same_thread)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
+    conn.execute("PRAGMA busy_timeout=30000")
     return conn
 
 

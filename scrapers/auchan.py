@@ -1,5 +1,6 @@
 import logging
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from curl_cffi import requests as creq
@@ -25,6 +26,7 @@ AUCHAN_CITIES = [
 CAT_WORKERS = 6    # parallel level-3 categories
 PAGE_WORKERS = 4   # parallel pages within a category
 PAGE_SIZE = 200    # products per GraphQL page (works reliably up to 200)
+RETRIES = 3        # retry transient errors so a hiccup doesn't drop a page
 
 # categoryList returns ~20 top-level entries; the real catalog lives under this one.
 # Other roots are secondary nav that duplicates branches of the main tree.
@@ -79,21 +81,30 @@ class AuchanScraper(BaseScraper):
         return s
 
     def _gql(self, query: str, variables: dict | None = None) -> dict:
-        resp = self._session().post(
-            GRAPHQL,
-            json={"query": query, "variables": variables or {}},
-            headers={
-                "Content-Type": "application/json",
-                "Origin": BASE,
-                "Store": STORE,
-            },
-            timeout=60,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        if "errors" in data:
-            raise RuntimeError(f"GraphQL error: {data['errors']}")
-        return data["data"]
+        last_err = None
+        for attempt in range(RETRIES):
+            try:
+                resp = self._session().post(
+                    GRAPHQL,
+                    json={"query": query, "variables": variables or {}},
+                    headers={
+                        "Content-Type": "application/json",
+                        "Origin": BASE,
+                        "Store": STORE,
+                    },
+                    timeout=60,
+                )
+                resp.raise_for_status()
+                data = resp.json()
+                if "errors" in data:
+                    raise RuntimeError(f"GraphQL error: {data['errors']}")
+                return data["data"]
+            except Exception as e:
+                last_err = e
+                if attempt < RETRIES - 1:
+                    log.debug("[auchan] retry %d/%d: %s", attempt + 1, RETRIES, e)
+                    time.sleep(1.0 * (attempt + 1))
+        raise last_err
 
     def chain_name(self) -> str:
         return "auchan"

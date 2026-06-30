@@ -6,6 +6,7 @@ import requests
 
 import config
 from scrapers.base import BaseScraper, ScrapedCategory, ScrapedProduct, StoreInfo
+from scrapers.http import make_session
 
 log = logging.getLogger(__name__)
 
@@ -30,8 +31,7 @@ class SilpoScraper(BaseScraper):
     def _get_session(self) -> requests.Session:
         s = getattr(self._local, "session", None)
         if s is None:
-            s = requests.Session()
-            s.headers.update(HEADERS)
+            s = make_session(HEADERS)
             self._local.session = s
         return s
 
