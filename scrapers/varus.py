@@ -202,18 +202,27 @@ class VarusScraper(BaseScraper):
         log.info("[varus] Fetching promos for %s (shop %d)...", store.address or store.name, shop_id)
 
         products = []
+        failed_cats: list = []
         with ThreadPoolExecutor(max_workers=CAT_WORKERS) as pool:
             futures = {
-                pool.submit(self._fetch_category_promos, shop_id, cat_id): cat_name
+                pool.submit(self._fetch_category_promos, shop_id, cat_id): (cat_id, cat_name)
                 for cat_id, cat_name in CATEGORIES
             }
             for future in as_completed(futures):
-                cat_name = futures[future]
+                cat_id, cat_name = futures[future]
                 try:
-                    cat_products = future.result()
-                    products.extend(cat_products)
+                    products.extend(future.result())
                 except Exception as e:
+                    failed_cats.append((cat_id, cat_name))
                     log.warning("[varus] %s: category %s failed: %s", store.name, cat_name, e)
+
+        # Calm sequential retry of categories that dropped under the burst.
+        for cat_id, cat_name in failed_cats:
+            try:
+                products.extend(self._fetch_category_promos(shop_id, cat_id))
+                log.info("[varus] %s: category %s recovered on retry", store.name, cat_name)
+            except Exception as e:
+                log.warning("[varus] %s: category %s still failed: %s", store.name, cat_name, e)
 
         log.info("[varus] %s: %d promo products total", store.address or store.name, len(products))
         return products
@@ -237,6 +246,7 @@ class VarusScraper(BaseScraper):
         if total_pages <= 1:
             return promos
 
+        failed_pages: list = []
         with ThreadPoolExecutor(max_workers=PAGE_WORKERS) as pool:
             futures = {
                 pool.submit(self._fetch_page, cat_id, shop_id, p): p
@@ -250,8 +260,20 @@ class VarusScraper(BaseScraper):
                         if item["priceInfo"].get("specialPrice"):
                             promos.append(self._normalize(item, str(cat_id)))
                 except Exception as e:
+                    failed_pages.append(page_num)
                     log.warning("[varus] shop %d cat %d page %d failed: %s",
                                 shop_id, cat_id, page_num, e)
+
+        # Calm sequential retry of pages that dropped under the burst.
+        for page_num in failed_pages:
+            try:
+                for item in self._fetch_page(cat_id, shop_id, page_num):
+                    if item["priceInfo"].get("specialPrice"):
+                        promos.append(self._normalize(item, str(cat_id)))
+                log.info("[varus] shop %d cat %d page %d recovered on retry", shop_id, cat_id, page_num)
+            except Exception as e:
+                log.warning("[varus] shop %d cat %d page %d still failed: %s",
+                            shop_id, cat_id, page_num, e)
 
         return promos
 

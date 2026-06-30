@@ -155,15 +155,27 @@ class ForaScraper(BaseScraper):
 
         # Pages are 1-indexed, inclusive ranges: (1..page), (page+1..2*page), ...
         ranges = [(start, start + page - 1) for start in range(page + 1, total + 1, page)]
+        failed_ranges: list = []
         with ThreadPoolExecutor(max_workers=PAGE_WORKERS) as pool:
             futures = {pool.submit(self._fetch_page, filial_id, a, b): (a, b) for a, b in ranges}
             for future in as_completed(futures):
+                a, b = futures[future]
                 try:
                     page_items = future.result().get("items", []) or []
                     products.extend(self._normalize(it) for it in page_items)
                 except Exception as e:
-                    rng = futures[future]
-                    log.warning("[fora] %s: range %s failed: %s", store.id, rng, e)
+                    failed_ranges.append((a, b))
+                    log.warning("[fora] %s: range (%d, %d) failed: %s", store.id, a, b, e)
+
+        # Calm sequential retry of ranges that dropped under the concurrent burst —
+        # the rest of the store is done by now, so a second pass usually recovers them.
+        for a, b in failed_ranges:
+            try:
+                page_items = self._fetch_page(filial_id, a, b).get("items", []) or []
+                products.extend(self._normalize(it) for it in page_items)
+                log.info("[fora] %s: range (%d, %d) recovered on retry", store.id, a, b)
+            except Exception as e:
+                log.warning("[fora] %s: range (%d, %d) still failed: %s", store.id, a, b, e)
 
         log.info("[fora] %s: %d / %d products", store.name, len(products), total)
         return products
