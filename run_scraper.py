@@ -68,19 +68,21 @@ def assign_unified_categories(conn):
         )
 
 
-# Per-chain store-worker counts. Each chain targets its OWN host, so scraping
-# all chains at once does NOT raise any single host's request rate above these
-# numbers — only the machine-wide socket total rises, which is covered by the
-# launchd soft fd limit of 8192 (com.sls.refresh.plist). Tuned per host:
-#   silpo/fora — robust REST APIs; 10 store-workers x 5 page-workers ≈ 50 sockets.
-#   varus      — fragile GraphQL with a 3-level fan-out (store x category x page);
-#                workers=10 meant ~250 sockets and a storm of 500s with lost data.
-#                Capped at 2 (well under the "≤5" ceiling) to stay reliable.
-#   atb/auchan/metro/novus/fozzy — one national catalog, scraped once then cached;
-#                extra store-workers just block on the cache lock, so keep low.
+# Per-chain store-worker counts. A test run with every chain live showed the
+# real limit is AGGREGATE, not per-host: silpo (plain GET) handled 10x5≈50
+# sockets fine, but fora and varus (POST/GraphQL) started dropping connections
+# (BrokenPipe / reset / SSL-EOF) once the machine ran ~150-200 sockets at once.
+# Concurrency is now bounded two ways:
+#   1. scrapers.http.REQUEST_GATE caps total in-flight requests across ALL chains
+#      (HTTP_MAX_CONCURRENCY, default 48) — the systemic fix for the aggregate.
+#   2. these per-chain caps keep the two fragile hosts gentle on their own:
+#        fora  — 4 store x 3 page  ≈ 12 concurrent (was 10x5=50 → broke).
+#        varus — 2 store x 3 cat x 3 page ≈ 18 (was effectively 10x5x5=250).
+#   silpo stays at 10 (proven fine). National-catalog chains scrape once then
+#   cache, so extra store-workers just wait on the cache lock — keep low.
 CHAIN_WORKERS = {
     "silpo": 10,
-    "fora": 10,
+    "fora": 4,
     "varus": 2,
     "fozzy": 4,
     "atb": 2,

@@ -6,6 +6,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from curl_cffi import requests as creq
 
 from scrapers.base import BaseScraper, ScrapedCategory, ScrapedProduct, StoreInfo
+from scrapers.http import REQUEST_GATE
 
 log = logging.getLogger(__name__)
 
@@ -84,16 +85,17 @@ class AuchanScraper(BaseScraper):
         last_err = None
         for attempt in range(RETRIES):
             try:
-                resp = self._session().post(
-                    GRAPHQL,
-                    json={"query": query, "variables": variables or {}},
-                    headers={
-                        "Content-Type": "application/json",
-                        "Origin": BASE,
-                        "Store": STORE,
-                    },
-                    timeout=60,
-                )
+                with REQUEST_GATE:
+                    resp = self._session().post(
+                        GRAPHQL,
+                        json={"query": query, "variables": variables or {}},
+                        headers={
+                            "Content-Type": "application/json",
+                            "Origin": BASE,
+                            "Store": STORE,
+                        },
+                        timeout=60,
+                    )
                 resp.raise_for_status()
                 data = resp.json()
                 if "errors" in data:
