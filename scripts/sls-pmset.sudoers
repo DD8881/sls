@@ -1,0 +1,9 @@
+# SLS daily refresh (com.sls.refresh) — allow the refresh job to toggle
+# lid-close sleep without a password, so an unattended scrape can run on
+# battery with the lid closed. Scoped to EXACTLY the two pmset invocations
+# scripts/refresh.sh issues — grants nothing else.
+#
+# Install (run once, needs sudo):
+#   sudo install -m 0440 -o root -g wheel scripts/sls-pmset.sudoers /etc/sudoers.d/sls-pmset
+#   sudo visudo -cf /etc/sudoers.d/sls-pmset   # validate
+daniil.d ALL=(root) NOPASSWD: /usr/bin/pmset -a disablesleep 1, /usr/bin/pmset -a disablesleep 0
