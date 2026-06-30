@@ -16,6 +16,9 @@ __pycache__/
 # Generated static output (~1GB; rebuild via generate_static.py)
 data/
 
+# Promo banners (regenerated daily by promo.py into best-sales-images/<date>/)
+best-sales-images/
+
 # Cloudflare Worker build/deploy artifacts
 public/
 node_modules/
