@@ -22,6 +22,26 @@ function json(data, status = 200) {
   });
 }
 
+// Fire-and-forget a server-side event to PostHog. Never blocks or breaks the
+// webhook/feedback response: ctx.waitUntil keeps the request alive until the
+// POST settles, and any failure is swallowed (analytics must not affect the
+// bot). distinct_id is namespaced `sls:<telegram_id>` to match the Mini App
+// client, so a user's bot-side and app-side events unify into one person.
+function track(env, ctx, distinctId, event, properties = {}) {
+  if (!env.POSTHOG_KEY || !distinctId) return;
+  const p = fetch(`${env.POSTHOG_HOST || "https://us.i.posthog.com"}/capture/`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      api_key: env.POSTHOG_KEY,
+      event,
+      distinct_id: distinctId,
+      properties: { ...properties, source: "bot", $lib: "cloudflare-worker" },
+    }),
+  }).catch(() => {});
+  if (ctx && ctx.waitUntil) ctx.waitUntil(p);
+}
+
 function hex(buf) {
   return [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
@@ -69,7 +89,7 @@ async function verifyInitData(initData, botToken) {
   }
 }
 
-async function handleFeedback(request, env) {
+async function handleFeedback(request, env, ctx) {
   if (!env.BOT_TOKEN || !env.FEEDBACK_CHAT_ID) {
     return json({ error: "feedback not configured" }, 503);
   }
@@ -98,6 +118,8 @@ async function handleFeedback(request, env) {
     }),
   });
   if (!resp.ok) return json({ error: "send failed" }, 502);
+  const fid = user && user.id;
+  track(env, ctx, fid ? `sls:${fid}` : null, "feedback_submitted", { length: text.length });
   return json({ ok: true });
 }
 
@@ -176,7 +198,7 @@ function subscribePrompt(env) {
 
 // Telegram bot webhook. Static-only: no DB. Mirrors the surviving Python handlers
 // (start/help); /search and /stats were dropped — search lives in the Mini App.
-async function handleWebhook(request, env) {
+async function handleWebhook(request, env, ctx) {
   if (env.WEBHOOK_SECRET) {
     const got = request.headers.get("X-Telegram-Bot-Api-Secret-Token");
     if (got !== env.WEBHOOK_SECRET) return new Response("forbidden", { status: 403 });
@@ -189,8 +211,10 @@ async function handleWebhook(request, env) {
     const cq = update.callback_query;
     if (cq.data === "check_sub") {
       const userId = cq.from && cq.from.id;
+      const did = userId ? `sls:${userId}` : null;
       const msg = cq.message;
       if (await isSubscribed(env, userId)) {
+        track(env, ctx, did, "subscription_passed");
         await tg(env, "answerCallbackQuery", { callback_query_id: cq.id });
         if (msg && env.WEBAPP_URL) {
           const m = openWebappMessage(env, cq.from && cq.from.first_name);
@@ -202,6 +226,7 @@ async function handleWebhook(request, env) {
           });
         }
       } else {
+        track(env, ctx, did, "subscription_failed");
         await tg(env, "answerCallbackQuery", {
           callback_query_id: cq.id,
           text: "Ще не бачу підписки 🙈 Підпишіться на канал і спробуйте ще раз.",
@@ -222,14 +247,21 @@ async function handleWebhook(request, env) {
   const cmd = text.split(/\s+/)[0].split("@")[0];
 
   if (cmd === "/start") {
+    const uid = message.from && message.from.id;
+    const did = uid ? `sls:${uid}` : null;
     if (!env.WEBAPP_URL) {
       await sendMessage(env, chatId, "Налаштуйте WEBAPP_URL для використання бота.");
-    } else if (await isSubscribed(env, message.from && message.from.id)) {
-      const m = openWebappMessage(env, message.from && message.from.first_name);
-      await sendMessage(env, chatId, m.text, m.extra);
     } else {
-      const p = subscribePrompt(env);
-      await sendMessage(env, chatId, p.text, p.extra);
+      const subbed = await isSubscribed(env, uid);
+      track(env, ctx, did, "bot_started", { subscribed: subbed });
+      if (subbed) {
+        const m = openWebappMessage(env, message.from && message.from.first_name);
+        await sendMessage(env, chatId, m.text, m.extra);
+      } else {
+        track(env, ctx, did, "subscription_gate_shown");
+        const p = subscribePrompt(env);
+        await sendMessage(env, chatId, p.text, p.extra);
+      }
     }
   } else if (cmd === "/help") {
     await sendMessage(
@@ -245,14 +277,14 @@ async function handleWebhook(request, env) {
 }
 
 export default {
-  async fetch(request, env) {
+  async fetch(request, env, ctx) {
     const url = new URL(request.url);
 
     if (url.pathname === "/api/feedback" && request.method === "POST") {
-      return handleFeedback(request, env);
+      return handleFeedback(request, env, ctx);
     }
     if (url.pathname === "/webhook" && request.method === "POST") {
-      return handleWebhook(request, env);
+      return handleWebhook(request, env, ctx);
     }
 
     // Everything else -> static assets (Mini App shell + /static + /data),

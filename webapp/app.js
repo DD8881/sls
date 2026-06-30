@@ -4,6 +4,10 @@ tg.expand();
 
 const $ = (id) => document.getElementById(id);
 
+// Analytics is optional: if analytics.js failed to load, track() must still
+// exist as a no-op so instrumentation never throws into the app.
+window.track = window.track || function () {};
+
 let state = {
   city: localStorage.getItem('sls_city') || null,
   chain: null,
@@ -137,7 +141,7 @@ function renderCityDropdown() {
   const gbtn = $('city-geo-btn');
   if (gbtn) gbtn.onclick = (e) => { e.stopPropagation(); requestCityGeo(); };
   dd.querySelectorAll('.city-option').forEach(opt => {
-    opt.onclick = () => selectCity(opt.dataset.city, true);  // explicit pick → geo won't override
+    opt.onclick = () => selectCity(opt.dataset.city, 'manual');  // explicit pick → geo won't override
   });
 }
 
@@ -205,6 +209,7 @@ function renderChains() {
   el.querySelectorAll('.store-tab').forEach(btn => {
     btn.onclick = () => {
       state.chain = btn.dataset.chain || null;
+      if (state.chain) track('chain_filtered', { chain: state.chain, context: state.rowMode ? 'search' : 'category' });
       state.store = null;
       state.storeProductIds = null;
       state.subcategory = null;
@@ -364,12 +369,13 @@ function nearestCity(lat, lng) {
   return (best && bestD <= GEO_CITY_MAX_KM) ? best : null;
 }
 
-function selectCity(city, isManual) {
+function selectCity(city, method) {
   state.geoHint = null;
   state.city = city;
   localStorage.setItem('sls_city', city);
-  if (isManual) localStorage.setItem('sls_city_manual', '1');
+  if (method === 'manual') localStorage.setItem('sls_city_manual', '1');
   else localStorage.removeItem('sls_city_manual');  // geo selection follows the user
+  track('city_selected', { city, method, $set: { current_city: city } });
   closeCityDD();
   renderCityBtn();
   loadCityData();
@@ -385,24 +391,26 @@ function detectCityByGeo() {
     state.geoCity = best;
     if (cityOpen) renderCityDropdown();
     if (!localStorage.getItem('sls_city_manual') && state.city !== best) {
-      selectCity(best, false);
+      selectCity(best, 'auto');
     }
   });
 }
 
 // Manual trigger from the "📍" button in the city dropdown.
 function requestCityGeo() {
-  if (state.geoCity) { selectCity(state.geoCity, false); return; }
+  if (state.geoCity) { selectCity(state.geoCity, 'geo'); return; }
   const btn = $('city-geo-btn');
   if (btn) { btn.textContent = '...'; btn.disabled = true; }
+  track('geo_requested', { context: 'city' });
   getUserPosition(
     (lat, lng) => {
+      track('geo_granted', { context: 'city' });
       const best = nearestCity(lat, lng);
-      if (best) { state.geoCity = best; selectCity(best, false); }
+      if (best) { state.geoCity = best; selectCity(best, 'geo'); }
       else cityGeoFail('Поблизу не знайдено міст зі знижками.');
     },
-    () => cityGeoFail(GEO_DENIED_HINT),
-    { prompt: true, onDenied: () => cityGeoFail(GEO_DENIED_HINT) }
+    () => { track('geo_denied', { context: 'city' }); cityGeoFail(GEO_DENIED_HINT); },
+    { prompt: true, onDenied: () => { track('geo_denied', { context: 'city' }); cityGeoFail(GEO_DENIED_HINT); } }
   );
 }
 function cityGeoFail(msg) {
@@ -415,9 +423,10 @@ function requestGeoSort() {
   if (!btn) return;
   btn.textContent = '...';
   btn.disabled = true;
-  const onFail = () => { state.geoHint = GEO_DENIED_HINT; renderStoreList($('sheet-search-input').value.trim()); };
+  track('geo_requested', { context: 'sort' });
+  const onFail = () => { track('geo_denied', { context: 'sort' }); state.geoHint = GEO_DENIED_HINT; renderStoreList($('sheet-search-input').value.trim()); };
   getUserPosition(
-    () => { state.geoHint = null; state.geoSorted = true; renderStoreList($('sheet-search-input').value.trim()); },
+    () => { track('geo_granted', { context: 'sort' }); state.geoHint = null; state.geoSorted = true; renderStoreList($('sheet-search-input').value.trim()); },
     onFail,
     { prompt: true, onDenied: onFail }
   );
@@ -689,7 +698,7 @@ function renderProduct(p) {
   if (p.end) meta += `<span class="promo-date">до ${formatPromoEnd(p.end)}</span>`;
 
   return `
-    <div class="product-card" ${p.url ? `data-url="${escapeHtml(p.url)}"` : ''}>
+    <div class="product-card" ${p.url ? `data-url="${escapeHtml(p.url)}"` : ''} data-ch="${p.ch}" data-cat="${escapeHtml(p.cat || state.category || '')}" data-d="${p.d || 0}">
       ${img}
       <div class="product-info">
         <div class="product-title">${escapeHtml(p.t)}</div>
@@ -705,7 +714,10 @@ function bindCardEvents(container) {
     b.onclick = (e) => { e.stopPropagation(); toggleStores(parseInt(b.dataset.pid)); };
   });
   container.querySelectorAll('.product-card[data-url]').forEach(card => {
-    card.onclick = () => tg.openLink(card.dataset.url);
+    card.onclick = () => {
+      track('product_opened', { chain: card.dataset.ch, category: card.dataset.cat, discount: Number(card.dataset.d) || 0, city: state.city });
+      tg.openLink(card.dataset.url);
+    };
   });
 }
 
@@ -762,6 +774,7 @@ async function toggleStores(pid) {
   // result; either way it carries its own category slug.
   const product = state.filtered.find(p => p.id === pid) || state.products.find(p => p.id === pid);
   const cat = (product && product.cat) || state.category;
+  track('product_stores_expanded', { chain: product && product.ch, category: cat, city: state.city });
   const sd = await ensureStores(cat);
 
   const stores = state.index ? state.index.stores : {};
@@ -902,6 +915,13 @@ async function runSearch() {
   const candidates = ok ? state.searchIndex.filter(r => r[1].includes(nq)) : [];
   state.matchRows = candidates;
 
+  if (pendingSearchTrack !== null) {
+    const q = pendingSearchTrack;
+    pendingSearchTrack = null;
+    track('search_performed', { query: q, query_length: q.length, results_count: candidates.length });
+    if (candidates.length === 0) track('search_zero_results', { query: q });
+  }
+
   renderChains();
   renderCategories();
   renderStoreFilter();
@@ -946,6 +966,7 @@ async function loadCategoryProducts() {
     return;
   }
 
+  track('category_opened', { category: state.category, city: state.city });
   renderSkeleton(6);
   state.storeProductIds = null;
   state.subcategory = null;
@@ -997,17 +1018,20 @@ function applyFilters() {
 
 // Search
 let searchTimeout;
+let pendingSearchTrack = null;  // query awaiting a search_performed event (set on input, consumed in runSearch)
 $('search-input').addEventListener('input', (e) => {
   clearTimeout(searchTimeout);
   const val = e.target.value.trim();
   searchTimeout = setTimeout(() => {
+    const changed = val !== state.search;
     state.search = val;
     state.offset = 0;
+    if (changed && normSearch(val).length >= SEARCH_MIN_CHARS) pendingSearchTrack = val;
     refreshView();   // search / feed / category, per current state
   }, 200);
 });
 
-$('load-more-btn').addEventListener('click', () => appendProducts());
+$('load-more-btn').addEventListener('click', () => { track('load_more', { loaded: state.offset }); appendProducts(); });
 
 // ---- Share the bot ----
 let toastTimer = null;
@@ -1040,6 +1064,7 @@ function legacyCopy(text) {
 
 $('share-btn').addEventListener('click', async () => {
   if (!BOT_LINK) return;
+  track('bot_shared');
   await copyText(BOT_LINK);
   if (tg.HapticFeedback) tg.HapticFeedback.notificationOccurred('success');
   showToast('Посилання скопійовано ✓');
@@ -1088,6 +1113,7 @@ $('fb-send').addEventListener('click', async () => {
 
 // Init
 (async () => {
+  track('app_opened', { has_city: !!state.city });
   await loadCities();
   state.meta = await fetchJSON('meta.json');
   if (state.city) {

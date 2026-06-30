@@ -21,8 +21,12 @@
     // Set CHANNEL to the channel's @username (public) or its -100… id (private).
     // For a private channel also set CHANNEL_INVITE to a t.me invite link.
     // Leave CHANNEL empty/removed to disable the gate.
-    "CHANNEL": "@sales_ua_news"
+    "CHANNEL": "@sales_ua_news",
     // "CHANNEL_INVITE": "https://t.me/+xxxxxxxx"
+
+    // PostHog project API key (public ingest-only key — safe in source). Drives
+    // server-side bot events via track() in worker/index.js. Empty = analytics off.
+    "POSTHOG_KEY": "phc_t9kG4uNFjDmQuVnUQNPjZrnxqGHMyoMeRdcaN2eFdscn"
   }
 
   // Secrets (NOT here — set via `wrangler secret put`):
