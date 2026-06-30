@@ -10,9 +10,12 @@ Usage:
 """
 import argparse
 import logging
+import os
+import sqlite3
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+import config
 import db
 from categories_map import (
     map_atb_category,
@@ -103,12 +106,13 @@ def scrape_store(scraper, store):
         return store, None
 
 
-def run_chain(scraper, conn, db_lock, args):
+def run_chain(scraper, conn, db_lock, args, fresh):
     """Scrape one chain end to end.
 
     Runs in its own thread (one per chain). All DB writes go through db_lock so
     the shared connection keeps a single writer at any instant; network I/O for
-    every chain overlaps freely in between.
+    every chain overlaps freely in between. ``fresh`` is True for a from-scratch
+    build (empty DB) — then per-store clears are unnecessary.
     """
     chain = scraper.chain_name()
 
@@ -140,6 +144,9 @@ def run_chain(scraper, conn, db_lock, args):
     workers = args.workers or CHAIN_WORKERS.get(chain, DEFAULT_WORKERS)
     total_products = 0
     total_stores = 0
+    # Per-chain {external_id: product_id}: promo products repeat across a chain's
+    # branches, so this lets the writer skip re-upserting the same product per store.
+    id_cache: dict = {}
     with ThreadPoolExecutor(max_workers=workers, thread_name_prefix=f"{chain}-store") as pool:
         futures = {pool.submit(scrape_store, scraper, s): s for s in stores}
         for future in as_completed(futures):
@@ -149,8 +156,9 @@ def run_chain(scraper, conn, db_lock, args):
                     log.info("[%s] %s: 0 products, skipping", chain, store.name)
                 continue
             with db_lock:
-                db.clear_store_products(conn, store.id)
-                db.upsert_products(conn, products, store.id)
+                if not fresh:
+                    db.clear_store_products(conn, store.id)
+                db.upsert_products(conn, products, store.id, id_cache)
                 conn.commit()
             total_products += len(products)
             total_stores += 1
@@ -158,6 +166,40 @@ def run_chain(scraper, conn, db_lock, args):
 
     log.info("[%s] Done: %d products across %d stores", chain, total_products, total_stores)
     return total_products, total_stores
+
+
+def _existing_product_total(db_path: str) -> int | None:
+    """Product count in the current live DB, or None if there isn't one yet."""
+    if not os.path.exists(db_path):
+        return None
+    try:
+        c = sqlite3.connect(db_path)
+        try:
+            return c.execute("SELECT COUNT(*) FROM products").fetchone()[0]
+        finally:
+            c.close()
+    except sqlite3.Error:
+        return None
+
+
+def _swap_into_place(build_path: str, db_path: str, new_total: int, prev_total: int | None):
+    """Atomically replace db_path with the freshly built DB, keeping a .bak.
+
+    Refuses to swap if the fresh build looks broken (zero products, or a >50%%
+    drop vs the previous DB) so a failed/partial scrape can't wipe good data.
+    """
+    if new_total == 0:
+        log.error("Fresh build has 0 products — NOT swapping. Keeping %s; build left at %s",
+                  db_path, build_path)
+        return
+    if prev_total and new_total < prev_total * 0.5:
+        log.error("Fresh build has %d products vs %d before (<50%%) — NOT swapping. "
+                  "Keeping %s; inspect %s", new_total, prev_total, db_path, build_path)
+        return
+    if os.path.exists(db_path):
+        os.replace(db_path, db_path + ".bak")
+    os.replace(build_path, db_path)
+    log.info("Swapped fresh DB into %s (previous kept as %s.bak)", db_path, db_path)
 
 
 def main():
@@ -168,17 +210,41 @@ def main():
                         help="Override store workers for every chain (default: per-chain tuned values)")
     args = parser.parse_args()
 
-    db.init_db()
-    conn = db.get_connection(check_same_thread=False)
-    conn.execute("PRAGMA synchronous=NORMAL")  # safe under WAL; far fewer fsyncs over the run
-    db_lock = threading.Lock()
+    # Full run -> build a fresh DB off to the side and atomically swap it in.
+    # Nothing reads the DB during a scrape, so this is faster (disposable file:
+    # no fsync, indexes built once at the end) AND safer (production is untouched
+    # until the swap; a crash leaves yesterday's data intact). Partial runs
+    # (--chain/--city) must NOT swap — they'd wipe the data they didn't scrape —
+    # so they update the live DB in place as before.
+    full_run = not (args.chain or args.city)
+    db_path = config.DATABASE_PATH
 
+    if full_run:
+        build_path = db_path + ".tmp"
+        for suffix in ("", "-wal", "-shm", "-journal"):
+            try:
+                os.remove(build_path + suffix)
+            except FileNotFoundError:
+                pass
+        prev_total = _existing_product_total(db_path)
+        conn = db.get_build_connection(build_path)
+        db.create_tables(conn)
+        log.info("Full run: building fresh DB at %s (swap into %s at end)", build_path, db_path)
+    else:
+        db.init_db()
+        conn = db.get_connection(check_same_thread=False)
+        conn.execute("PRAGMA synchronous=NORMAL")  # safe under WAL; far fewer fsyncs
+        build_path, prev_total = None, None
+        log.info("Partial run: updating %s in place", db_path)
+
+    db_lock = threading.Lock()
     scrapers = [s for s in get_scrapers() if not args.chain or s.chain_name() == args.chain]
 
     # Chains hit independent hosts, so scrape them all concurrently: wall-clock
     # drops from sum(chain times) to ~max(chain time) with no extra load per host.
     with ThreadPoolExecutor(max_workers=max(len(scrapers), 1), thread_name_prefix="chain") as pool:
-        futures = {pool.submit(run_chain, sc, conn, db_lock, args): sc.chain_name() for sc in scrapers}
+        futures = {pool.submit(run_chain, sc, conn, db_lock, args, full_run): sc.chain_name()
+                   for sc in scrapers}
         for future in as_completed(futures):
             chain = futures[future]
             try:
@@ -196,12 +262,20 @@ def main():
     if orphaned:
         log.info("Cleaned up %d orphaned products", orphaned)
 
+    if full_run:
+        log.info("Creating indexes...")
+        db.create_indexes(conn)
+        conn.commit()
+
     stats = db.get_stats(conn)
     conn.close()
     log.info(
         "Done. %d products across %d stores. Chains: %s",
         stats["total_products"], stats["total_stores"], stats["chains"],
     )
+
+    if full_run:
+        _swap_into_place(build_path, db_path, stats["total_products"], prev_total)
 
 
 if __name__ == "__main__":
