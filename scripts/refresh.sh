@@ -46,6 +46,9 @@ caffeinate -i -s bash -c '
   set -o pipefail
   ./.venv/bin/python run_scraper.py || { echo "SCRAPE FAILED (rc=$?)"; exit 10; }
   ./deploy.sh                       || { echo "DEPLOY FAILED (rc=$?)"; exit 20; }
+  # промо-банери топ-знижок → best-sales-images/<дата>/ (локальний контент).
+  # Не фатально: scrape+deploy уже успішні, биті банери не валять прогін.
+  ./.venv/bin/python promo.py       || echo "PROMO BANNERS FAILED (rc=$?) — non-fatal"
 '
 rc=$?
 
