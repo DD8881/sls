@@ -94,6 +94,9 @@ CHAIN_WORKERS = {
     "novus": 2,
 }
 DEFAULT_WORKERS = 6
+# Stores that errored are re-scraped once at the end with low concurrency — by
+# then most chains are done, so the calmer conditions recover transient drops.
+RETRY_WORKERS = 3
 
 
 def scrape_store(scraper, store):
@@ -129,7 +132,7 @@ def run_chain(scraper, conn, db_lock, args, fresh):
         all_stores = scraper.get_stores()
     except Exception:
         log.exception("[%s] Failed to fetch stores", chain)
-        return 0, 0
+        return 0, 0, []
 
     stores = [s for s in all_stores if s.city]
     if args.city:
@@ -144,6 +147,7 @@ def run_chain(scraper, conn, db_lock, args, fresh):
     workers = args.workers or CHAIN_WORKERS.get(chain, DEFAULT_WORKERS)
     total_products = 0
     total_stores = 0
+    failed: list = []  # stores that errored (returned None) — retried later in a calm pass
     # Per-chain {external_id: product_id}: promo products repeat across a chain's
     # branches, so this lets the writer skip re-upserting the same product per store.
     id_cache: dict = {}
@@ -152,7 +156,9 @@ def run_chain(scraper, conn, db_lock, args, fresh):
         for future in as_completed(futures):
             store, products = future.result()
             if not products:
-                if products is not None:
+                if products is None:
+                    failed.append(store)  # error, not a legit empty store
+                else:
                     log.info("[%s] %s: 0 products, skipping", chain, store.name)
                 continue
             with db_lock:
@@ -164,8 +170,10 @@ def run_chain(scraper, conn, db_lock, args, fresh):
             total_stores += 1
             log.info("[%s] %s: %d products saved", chain, store.name, len(products))
 
+    if failed:
+        log.info("[%s] %d store(s) failed — queued for retry pass", chain, len(failed))
     log.info("[%s] Done: %d products across %d stores", chain, total_products, total_stores)
-    return total_products, total_stores
+    return total_products, total_stores, failed
 
 
 def _existing_product_total(db_path: str) -> int | None:
@@ -242,17 +250,42 @@ def main():
 
     # Chains hit independent hosts, so scrape them all concurrently: wall-clock
     # drops from sum(chain times) to ~max(chain time) with no extra load per host.
+    failed_stores = []  # (scraper, store) pairs that errored — retried below
     with ThreadPoolExecutor(max_workers=max(len(scrapers), 1), thread_name_prefix="chain") as pool:
-        futures = {pool.submit(run_chain, sc, conn, db_lock, args, full_run): sc.chain_name()
-                   for sc in scrapers}
+        futures = {pool.submit(run_chain, sc, conn, db_lock, args, full_run): sc for sc in scrapers}
         for future in as_completed(futures):
-            chain = futures[future]
+            sc = futures[future]
             try:
-                future.result()
+                _tp, _ts, failed = future.result()
+                failed_stores.extend((sc, st) for st in failed)
             except Exception:
-                log.exception("[%s] chain crashed", chain)
+                log.exception("[%s] chain crashed", sc.chain_name())
 
-    # All chain threads have joined here — finalisation is single-threaded.
+    # Retry pass: re-scrape stores that errored, now that load has dropped (most
+    # chains finished). Low concurrency on purpose — they failed under burst, so a
+    # calm pass recovers the transient ones. Runs before finalisation so recovered
+    # data is indexed and swapped in.
+    if failed_stores:
+        log.info("Retry pass: re-scraping %d store(s) that failed...", len(failed_stores))
+        recovered = 0
+        retry_caches: dict = {}
+        with ThreadPoolExecutor(max_workers=RETRY_WORKERS, thread_name_prefix="retry") as pool:
+            futures = {pool.submit(scrape_store, sc, st): st for sc, st in failed_stores}
+            for future in as_completed(futures):
+                store, products = future.result()
+                if not products:
+                    continue
+                cache = retry_caches.setdefault(store.chain, {})
+                with db_lock:
+                    if not full_run:
+                        db.clear_store_products(conn, store.id)
+                    db.upsert_products(conn, products, store.id, cache)
+                    conn.commit()
+                recovered += 1
+                log.info("[retry] %s %s: %d products recovered", store.chain, store.name, len(products))
+        log.info("Retry pass: recovered %d of %d failed store(s)", recovered, len(failed_stores))
+
+    # All scraping done — finalisation is single-threaded.
     log.info("Assigning unified categories...")
     assign_unified_categories(conn)
     conn.commit()

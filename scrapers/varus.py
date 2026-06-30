@@ -1,5 +1,6 @@
 import logging
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import requests
@@ -113,17 +114,25 @@ class VarusScraper(BaseScraper):
     def _graphql(self, query: str) -> dict:
         session = self._get_session()
         for attempt in range(4):
-            with REQUEST_GATE:
-                resp = session.post(
-                    GRAPHQL_URL,
-                    json={"query": query},
-                    timeout=60,
-                )
+            try:
+                with REQUEST_GATE:
+                    resp = session.post(
+                        GRAPHQL_URL,
+                        json={"query": query},
+                        timeout=60,
+                    )
+            except requests.RequestException as e:
+                if attempt < 3:
+                    wait = 0.5 * (attempt + 2)
+                    log.warning("[varus] connection error on attempt %d (%s), retrying in %.1fs...",
+                                attempt + 1, e, wait)
+                    time.sleep(wait)
+                    continue
+                raise
             if resp.status_code in (429, 502, 503) and attempt < 3:
                 wait = 0.5 * (attempt + 2)
                 log.warning("[varus] %d on attempt %d, retrying in %.1fs...",
                             resp.status_code, attempt + 1, wait)
-                import time
                 time.sleep(wait)
                 continue
             resp.raise_for_status()
