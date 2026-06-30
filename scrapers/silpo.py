@@ -110,16 +110,28 @@ class SilpoScraper(BaseScraper):
             return products
 
         offsets = list(range(limit, total, limit))
+        failed_offsets: list = []
         with ThreadPoolExecutor(max_workers=PAGE_WORKERS) as pool:
             futures = {pool.submit(self._fetch_page, branch_id, off, limit): off for off in offsets}
             for future in as_completed(futures):
+                off = futures[future]
                 try:
                     page_data = future.result()
                     page_items = page_data.get("items", page_data.get("content", []))
                     products.extend(self._normalize(item) for item in page_items)
                 except Exception as e:
-                    off = futures[future]
+                    failed_offsets.append(off)
                     log.warning("[silpo] %s: page offset=%d failed: %s", store.id, off, e)
+
+        # Calm sequential retry of pages that dropped under the concurrent burst.
+        for off in failed_offsets:
+            try:
+                page_data = self._fetch_page(branch_id, off, limit)
+                page_items = page_data.get("items", page_data.get("content", []))
+                products.extend(self._normalize(item) for item in page_items)
+                log.info("[silpo] %s: offset=%d recovered on retry", store.id, off)
+            except Exception as e:
+                log.warning("[silpo] %s: offset=%d still failed: %s", store.id, off, e)
 
         log.info("[silpo] %s: %d / %d products", store.address or store.id, len(products), total)
         return products

@@ -96,13 +96,22 @@ class NovusScraper(BaseScraper):
 
     def _graphql(self, query: str) -> dict:
         for attempt in range(4):
-            with REQUEST_GATE:
-                resp = self._session.post(
-                    GRAPHQL_URL,
-                    json={"query": query},
-                    headers={"Content-Type": "application/json"},
-                    timeout=60,
-                )
+            try:
+                with REQUEST_GATE:
+                    resp = self._session.post(
+                        GRAPHQL_URL,
+                        json={"query": query},
+                        headers={"Content-Type": "application/json"},
+                        timeout=60,
+                    )
+            except requests.RequestException as e:
+                if attempt < 3:
+                    wait = CRAWL_DELAY * (attempt + 1)
+                    log.warning("[novus] connection error on attempt %d (%s), retrying in %.1fs...",
+                                attempt + 1, e, wait)
+                    time.sleep(wait)
+                    continue
+                raise
             if resp.status_code in (502, 503) and attempt < 3:
                 wait = CRAWL_DELAY * (attempt + 1)
                 log.warning("[novus] %d on attempt %d, retrying in %.1fs...", resp.status_code, attempt + 1, wait)
