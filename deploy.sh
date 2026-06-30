@@ -19,7 +19,7 @@ echo "==> Assembling ./public"
 rm -rf public
 mkdir -p public/static public/data
 cp webapp/index.html public/index.html
-cp webapp/app.js webapp/style.css webapp/logo.png public/static/
+cp webapp/app.js webapp/analytics.js webapp/style.css webapp/logo.png public/static/
 # Copy data, but skip the pre-gzipped twins — Cloudflare compresses on the fly.
 rsync -a --exclude='*.gz' data/ public/data/
 # Never cache the Mini App shell, so a bumped ?v= asset URL is picked up on
