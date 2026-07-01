@@ -421,7 +421,7 @@ def _deal_line(medal: str, r: dict) -> str:
             f"(було {money(r['old_price'])}₴, −{round(r['discount_pct'])}%) · {ch}")
 
 
-def build_captions(pct: list, base: str) -> dict:
+def build_captions(pct: list, base: str, reel: bool = True) -> dict:
     """Складає готові підписи під кожен канал з тих самих даних, що й банери."""
     dt = date.today()
     top = pct[0]
@@ -465,12 +465,85 @@ def build_captions(pct: list, base: str) -> dict:
         "deals": [{"title": r["title"], "chain": r["chain"], "price": money(r["price"]),
                    "old_price": money(r["old_price"]), "discount_pct": round(r["discount_pct"]),
                    "line": lines[i]} for i, r in enumerate(deals)],
-        "images": {"pct": _pub_url(f"{base}_pct.png"), "save": _pub_url(f"{base}_save.png")},
+        "images": {"pct": _pub_url(f"{base}_pct.png"), "save": _pub_url(f"{base}_save.png"),
+                   **({"reel": _pub_url(f"{base}_reel.mp4")} if reel else {})},
         "hashtags": ig_tags,
         "instagram": {"text": ig_text},
         "threads": {"post1": hook, "post2": threads_p2, "topic": "знижки"},
         "tiktok": {"title": _short(hook, 90), "text": tt_text},
     }
+
+
+# ── Reel/TikTok відео (9:16 слайдшоу з банерів, без звуку) ────────────────────
+# Reels та TikTok-video вимагають ВІДЕО (через API фото-Reel неможливий). Робимо
+# вертикальний ролик: банер по центру на розмитому фоні + плавний зум + кросфейд.
+# ffmpeg береться з пакета imageio-ffmpeg (у venv), системний не потрібен.
+REEL_W, REEL_H = 1080, 1920
+REEL_FPS = 30
+REEL_SEC_EACH = 4.0      # тривалість на банер
+REEL_XFADE = 0.5         # кросфейд між банерами, с
+REEL_FADE = 0.4          # глобальний fade in/out з чорного, с
+REEL_FG_W = 1000         # ширина банера-переднього плану
+
+
+def _reel_prep(path: str):
+    from PIL import ImageFilter
+    im = Image.open(path).convert("RGB")
+    fg = im.resize((REEL_FG_W, round(REEL_FG_W * im.height / im.width)), Image.LANCZOS)
+    bw, bh = int(REEL_W * 1.18), int(REEL_H * 1.18)
+    sc = max(bw / im.width, bh / im.height)
+    cov = im.resize((round(im.width * sc), round(im.height * sc)), Image.LANCZOS)
+    l, t = (cov.width - bw) // 2, (cov.height - bh) // 2
+    bg = cov.crop((l, t, l + bw, t + bh)).filter(ImageFilter.GaussianBlur(38))
+    return fg, Image.eval(bg, lambda p: int(p * 0.82))
+
+
+def _reel_frame(prep, tt: float):
+    import numpy as np
+    fg, bg = prep
+    z = 1.0 + 0.06 * tt
+    zw, zh = round(REEL_W * z), round(REEL_H * z)
+    bgz = bg.resize((zw, zh), Image.LANCZOS)
+    l, t = (zw - REEL_W) // 2, (zh - REEL_H) // 2
+    canvas = bgz.crop((l, t, l + REEL_W, t + REEL_H))
+    canvas.paste(fg, ((REEL_W - fg.width) // 2, (REEL_H - fg.height) // 2))
+    return np.asarray(canvas, dtype=np.uint8)
+
+
+def build_reel(paths: list, out_path: str) -> str:
+    """9:16 ролик із банерів → mp4 (H.264/yuv420p). Повертає шлях."""
+    import numpy as np
+    import imageio.v2 as imageio
+    per = int(REEL_SEC_EACH * REEL_FPS)
+    xf = int(REEL_XFADE * REEL_FPS)
+    fn = int(REEL_FADE * REEL_FPS)
+    preps = [_reel_prep(p) for p in paths]
+    total = per + sum(per - xf for _ in preps[1:])
+
+    def fade(idx, f):
+        a = 1.0
+        if idx < fn:
+            a = (idx + 1) / (fn + 1)
+        elif idx >= total - fn:
+            a = (total - idx) / (fn + 1)
+        return f if a >= 1.0 else (f * a).astype(np.uint8)
+
+    w = imageio.get_writer(out_path, fps=REEL_FPS, codec="libx264", quality=8,
+                           pixelformat="yuv420p", macro_block_size=1)
+    gidx = 0
+    for ci, prep in enumerate(preps):
+        head = ([_reel_frame(preps[ci + 1], k / per) for k in range(xf)]
+                if ci + 1 < len(preps) else None)
+        for i in range(xf if ci > 0 else 0, per):
+            f = _reel_frame(prep, i / per)
+            if head is not None and i >= per - xf:
+                k = i - (per - xf)
+                b = (k + 1) / (xf + 1)
+                f = ((1 - b) * f + b * head[k]).astype(np.uint8)
+            w.append_data(fade(gidx, f))
+            gidx += 1
+    w.close()
+    return out_path
 
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
@@ -492,6 +565,8 @@ def main():
     ap.add_argument("--pct-lo", type=float, default=30.0)
     ap.add_argument("--pct-hi", type=float, default=80.0,
                     help="стеля % — вище зазвичай накрутка/неліквід")
+    ap.add_argument("--no-reel", action="store_true",
+                    help="не збирати 9:16 відео (Reels/TikTok) — швидше")
     args = ap.parse_args()
     if args.out:
         base = args.out[:-4] if args.out.endswith(".png") else args.out
@@ -536,8 +611,14 @@ def main():
                       hook_idx=(len(save_combo) - 1 if hook_item else None))
     print(f"\n✓ збережено: {p1}\n✓ збережено: {p2}")
 
+    # 9:16 відео для Reels/TikTok (потребує ffmpeg із imageio-ffmpeg).
+    if not args.no_reel:
+        print("\nзбірка відео (Reels/TikTok)…")
+        rp = build_reel([p1, p2], f"{base}_reel.mp4")
+        print(f"✓ збережено: {rp}")
+
     # Підписи для соцмереж (Buffer → IG/TikTok/Threads); ті самі дані, що й банери.
-    cap = build_captions(pct, base)
+    cap = build_captions(pct, base, reel=not args.no_reel)
     cap_path = os.path.join(os.path.dirname(base) or ".", "caption.json")
     with open(cap_path, "w", encoding="utf-8") as f:
         json.dump(cap, f, ensure_ascii=False, indent=2)
