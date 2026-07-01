@@ -20,6 +20,7 @@ from __future__ import annotations
 import argparse
 import html
 import io
+import json
 import os
 import re
 import sqlite3
@@ -345,6 +346,133 @@ def render_sheet(items, subtitle, out_path, *, hook_idx=None):
     return out_path
 
 
+# ── підписи для соцмереж (Buffer → Instagram/TikTok/Threads) ─────────────────
+# Генеруємо caption.json поряд з банерами: готові тексти під кожен канал + хук
+# дня. Постинг через Buffer стає «взяти URL картинки + готовий текст». Стратегія
+# і банк хуків задокументовані в SMM.md.
+PUBLIC_BASE = "https://sls.dolzhenkovdanil.workers.dev"   # звідки Buffer тягне PNG
+BOT_LINK    = "t.me/sales_ua_bot"
+
+CHAIN_UA = {   # slug → (людська назва, хештег)
+    "atb":    ("АТБ",    "#атб"),
+    "auchan": ("Ашан",   "#ашан"),
+    "fora":   ("Фора",   "#фора"),
+    "fozzy":  ("Фоззі",  "#фоззі"),
+    "metro":  ("Метро",  "#метро"),
+    "novus":  ("Новус",  "#новус"),
+    "silpo":  ("Сільпо", "#сільпо"),
+    "varus":  ("Варус",  "#варус"),
+}
+
+# 30 хуків → місяць без повторів; вибір детермінований по даті. Плейсхолдери
+# завжди беруться з топ-1 знижки дня, тож усі підставляються. Див. SMM.md.
+HOOKS = [
+    "Ви не повірите, які знижки {store} викатив сьогодні 👀",
+    "Ми більше не можемо мовчати про знижки, що сьогодні з'явились у {store} 🤐",
+    "{store} сьогодні знизив ціни так, що ми аж перепитали 😳",
+    "Хтось у {store} явно помилився з цінником… і це на нашу користь 👇",
+    "Те, що {store} зробив сьогодні з цінами, треба бачити на власні очі 👀",
+    "У {store} сьогодні відбувається щось дивне з цінниками 🧐",
+    "Здається, {store} забув, що знижки мають закінчуватись 🙈",
+    "Сьогодні в {store} знижка −{pct}%. Ні, це не помилка.",
+    "Знижки дня вже в боті. Завтра їх може не бути 🕐",
+    "−{pct}% у {store} — і це лише №1 у сьогоднішньому списку.",
+    "Поки ти це читаєш, хтось уже забирає {top_item} за {price}₴ 🏃",
+    "Такі ціни в {store} буває раз на місяць. Сьогодні — той день.",
+    "Ще вчора {top_item} коштував {old}₴. Сьогодні — {price}₴.",
+    "Це зникне до вечора. {top_item} за {price}₴ у {store} ⏳",
+    "Твій гаманець просив подякувати {store} за сьогодні 💸",
+    "{store} сьогодні наче вибачається цінами. Приймаємо 🤝",
+    "Ми порахували знижки {store} і трохи прослезились 🥲",
+    "Дієта відміняється: у {store} сьогодні −{pct}% 🍫",
+    "Начальник знижок у {store} сьогодні явно був у гарному настрої 😎",
+    "Не ми витратили твою зарплату. Це все {store} 🙃",
+    "Йшов за хлібом — вийшов з повним пакетом. Знижки дня в {store} 🛒",
+    "Коли зайшов у {store} «на пару хвилин», а там −{pct}% 😅",
+    "Той випадок, коли знижки в {store} кращі за твої плани на вечір.",
+    "Зберігай, поки {store} не передумав щодо цих цін 📌",
+    "Найбільша знижка сьогодні — {pct}% у {store}. Спробуйте побити.",
+    "{top_item} за {price}₴ замість {old}₴. Крапка.",
+    "Це не реклама {store}. Це просто ціни, від яких важко пройти повз.",
+    "−{pct}% — так знижок сьогодні не робить ніхто, крім {store}.",
+    "Топ знижок сьогодні по всіх мережах — в одному пості 👇",
+    "Зібрали найсоковитіші знижки дня. Дивись, поки не розібрали 👇",
+]
+
+CORE_TAGS = ["#знижки", "#акції", "#економія", "#розпродаж", "#україна"]
+MEDALS = ["🥇", "🥈", "🥉", "🔹", "🔹"]
+
+
+def _short(t: str, n: int) -> str:
+    t = " ".join(t.split())
+    return t if len(t) <= n else t[: n - 1].rstrip() + "…"
+
+
+def _pub_url(path: str) -> str | None:
+    """Публічний URL банера на воркері (deploy.sh кладе best-sales-images/ у public/)."""
+    p = os.path.normpath(path).replace(os.sep, "/")
+    i = p.find("best-sales-images/")
+    return f"{PUBLIC_BASE}/{p[i:]}" if i >= 0 else None
+
+
+def _deal_line(medal: str, r: dict) -> str:
+    ch = CHAIN_UA.get(r["chain"], (r["chain"].title(), ""))[0]
+    return (f"{medal} {_short(r['title'], 46)} — {money(r['price'])}₴ "
+            f"(було {money(r['old_price'])}₴, −{round(r['discount_pct'])}%) · {ch}")
+
+
+def build_captions(pct: list, base: str) -> dict:
+    """Складає готові підписи під кожен канал з тих самих даних, що й банери."""
+    dt = date.today()
+    top = pct[0]
+    deals = pct[:5]
+    fill = {
+        "store": CHAIN_UA.get(top["chain"], (top["chain"].title(), ""))[0],
+        "pct": round(top["discount_pct"]),
+        "top_item": _short(top["title"], 32),
+        "price": money(top["price"]),
+        "old": money(top["old_price"]),
+    }
+    hook = HOOKS[dt.toordinal() % len(HOOKS)].format_map(fill)
+    lines = [_deal_line(MEDALS[i], r) for i, r in enumerate(deals)]
+
+    chain_tags = []
+    for r in deals:
+        tag = CHAIN_UA.get(r["chain"], (None, None))[1]
+        if tag and tag not in chain_tags:
+            chain_tags.append(tag)
+    ig_tags = CORE_TAGS + chain_tags
+    tt_tags = ["#знижки", "#акції", "#україна"] + chain_tags[:2]
+
+    body = ["🔥 Топ знижки сьогодні:", *lines, "… +ще сотні знижок у боті"]
+    ig_text = "\n".join([
+        hook, "", *body, "",
+        "📲 Усі знижки всіх мереж безкоштовно — лінк у біо 👆", "",
+        " ".join(ig_tags),
+    ])
+    threads_p2 = "\n".join([
+        *body, "", f"📲 Усі знижки всіх мереж безкоштовно: {BOT_LINK}",
+    ])
+    tt_text = "\n".join([
+        hook, "", f"Топ знижки дня — усі мережі в боті (лінк у біо)", " ".join(tt_tags),
+    ])
+
+    return {
+        "date": f"{dt:%Y-%m-%d}",
+        "hook": hook,
+        "top": {"item": top["title"], "chain": top["chain"], "store": fill["store"],
+                "pct": fill["pct"], "price": fill["price"], "old": fill["old"]},
+        "deals": [{"title": r["title"], "chain": r["chain"], "price": money(r["price"]),
+                   "old_price": money(r["old_price"]), "discount_pct": round(r["discount_pct"]),
+                   "line": lines[i]} for i, r in enumerate(deals)],
+        "images": {"pct": _pub_url(f"{base}_pct.png"), "save": _pub_url(f"{base}_save.png")},
+        "hashtags": ig_tags,
+        "instagram": {"text": ig_text},
+        "threads": {"post1": hook, "post2": threads_p2, "topic": "знижки"},
+        "tiktok": {"title": _short(hook, 90), "text": tt_text},
+    }
+
+
 # ── CLI ───────────────────────────────────────────────────────────────────────
 def _log(tag, rows):
     print(f"\n[{tag}]")
@@ -407,6 +535,14 @@ def main():
     p2 = render_sheet(save_combo, f"Найбільша економія · {d}", f"{base}_save.png",
                       hook_idx=(len(save_combo) - 1 if hook_item else None))
     print(f"\n✓ збережено: {p1}\n✓ збережено: {p2}")
+
+    # Підписи для соцмереж (Buffer → IG/TikTok/Threads); ті самі дані, що й банери.
+    cap = build_captions(pct, base)
+    cap_path = os.path.join(os.path.dirname(base) or ".", "caption.json")
+    with open(cap_path, "w", encoding="utf-8") as f:
+        json.dump(cap, f, ensure_ascii=False, indent=2)
+    print(f"✓ збережено: {cap_path}")
+    print(f"\nхук дня: {cap['hook']}")
 
 
 if __name__ == "__main__":
