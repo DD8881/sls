@@ -141,24 +141,46 @@ class FozzyScraper(BaseScraper):
         log.info("[fozzy] %d unique sale products", len(products))
         return list(products.values())
 
+    @staticmethod
+    def _raw_count(listing: str) -> int:
+        """Number of product cards in a listing chunk (before the markdown filter)."""
+        return len(_OUTER_SPLIT.split(listing)) - 1 if listing else 0
+
     def _scrape_category(self, slug: str) -> list[ScrapedProduct]:
         first = self._fetch_json(slug, 1)
         listing = (first.get("data") or {}).get("products_and_filters", "")
         total = self._parse_total(first)
         items = self._parse_cards(listing, slug)
 
-        total_pages = math.ceil(total / PAGE_SIZE) if total else 1
-        if total_pages <= 1:
-            return items
+        # Derive the server page size from page 1 rather than trusting a constant,
+        # so a site-side page-size change can't silently truncate the tail.
+        page_size = self._raw_count(listing) or PAGE_SIZE
+        total_pages = math.ceil(total / page_size) if total and page_size else 1
 
-        with ThreadPoolExecutor(max_workers=PAGE_WORKERS) as pool:
-            futures = {pool.submit(self._fetch_listing, slug, pg): pg for pg in range(2, total_pages + 1)}
-            for fut in as_completed(futures):
-                pg = futures[fut]
-                try:
-                    items.extend(self._parse_cards(fut.result(), slug))
-                except Exception as e:
-                    log.warning("[fozzy] %s page %d failed: %s", slug, pg, e)
+        if total_pages > 1:
+            with ThreadPoolExecutor(max_workers=PAGE_WORKERS) as pool:
+                futures = {pool.submit(self._fetch_listing, slug, pg): pg for pg in range(2, total_pages + 1)}
+                for fut in as_completed(futures):
+                    pg = futures[fut]
+                    try:
+                        items.extend(self._parse_cards(fut.result(), slug))
+                    except Exception as e:
+                        log.warning("[fozzy] %s page %d failed: %s", slug, pg, e)
+
+        # Self-correcting tail: if `total` was under-reported, keep pulling pages
+        # past the computed end until one is empty. Fozzy 404s past the last page
+        # (verified), so this normally costs one extra request and then stops.
+        pg = total_pages + 1
+        while pg <= total_pages + 15:  # hard cap against a misbehaving endpoint
+            try:
+                extra = self._fetch_listing(slug, pg)
+            except Exception:
+                break  # 404 past the end
+            if self._raw_count(extra) == 0:
+                break
+            items.extend(self._parse_cards(extra, slug))
+            log.info("[fozzy] %s: page %d past computed end — count was under-reported", slug, pg)
+            pg += 1
         return items
 
     def _url(self, slug: str, page: int) -> str:

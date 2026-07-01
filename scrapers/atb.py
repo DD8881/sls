@@ -1,5 +1,6 @@
 import html as _html
 import logging
+import math
 import re
 import threading
 import time
@@ -143,17 +144,25 @@ class ATBScraper(BaseScraper):
         items = self._parse_sale_cards(first, slug)
         m = _TOTAL_RE.search(first)
         total = int(m.group(1)) if m else len(items)
-        if total <= PAGE_SIZE:
+
+        # Derive the page size from page 1 rather than trusting a constant, so a
+        # site-side change can't silently truncate. No tail-probe here: ATB clamps
+        # an out-of-range ?page=N to the last page (returns its cards, not 404), so
+        # "fetch until empty" would never terminate. The ceil() page count is exact.
+        page_size = len(_CARD_RE.findall(first)) or PAGE_SIZE
+        if total <= page_size:
             return items
 
-        pages = range(2, (total // PAGE_SIZE) + 2)
+        total_pages = math.ceil(total / page_size)
         with ThreadPoolExecutor(max_workers=PAGE_WORKERS) as pool:
-            futures = [pool.submit(self._get, f"{BASE}/catalog/{slug}?page={p}") for p in pages]
+            futures = {pool.submit(self._get, f"{BASE}/catalog/{slug}?page={p}"): p
+                       for p in range(2, total_pages + 1)}
             for fut in as_completed(futures):
+                p = futures[fut]
                 try:
                     items.extend(self._parse_sale_cards(fut.result(), slug))
                 except Exception as e:
-                    log.warning("[atb] %s page failed: %s", slug, e)
+                    log.warning("[atb] %s page %d failed: %s", slug, p, e)
         return items
 
     def _parse_sale_cards(self, html: str, slug: str) -> list[ScrapedProduct]:
