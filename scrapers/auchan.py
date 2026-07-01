@@ -54,6 +54,7 @@ query($uid:String!,$page:Int!,$size:Int!){
     page_info{ total_pages current_page }
     items{
       sku name url_key stock_status
+      url_rewrites{ url }
       image{ url }
       small_image{ url }
       price_range{ minimum_price{
@@ -229,7 +230,13 @@ class AuchanScraper(BaseScraper):
             if not sku:
                 continue
             img = (it.get("image") or {}).get("url") or (it.get("small_image") or {}).get("url")
-            url_key = it.get("url_key")
+            # The live product page lives at the url_rewrite path, which is
+            # `{url_key}-{entity_id}/` — NOT `{url_key}.html` (that just renders
+            # the homepage) and NOT `{url_key}/` (404). url_rewrites carries the
+            # only working path, so prefer it; fall back to no link otherwise.
+            rewrites = it.get("url_rewrites") or []
+            rel = rewrites[0].get("url") if rewrites else None
+            url = f"{BASE}/{rel}" if rel else None
             out.append(ScrapedProduct(
                 external_id=f"auchan_{sku}",
                 chain="auchan",
@@ -239,7 +246,7 @@ class AuchanScraper(BaseScraper):
                 old_price=float(regular) if regular and regular > final else None,
                 discount_pct=round(pct),
                 image_url=img,
-                url=f"{BASE}/{url_key}.html" if url_key else None,
+                url=url,
                 unit=None,
                 in_stock=(it.get("stock_status") == "IN_STOCK"),
                 promo_end_date=None,
