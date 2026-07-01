@@ -22,6 +22,9 @@ cp webapp/index.html public/index.html
 cp webapp/app.js webapp/analytics.js webapp/style.css webapp/logo.png public/static/
 # Copy data, but skip the pre-gzipped twins — Cloudflare compresses on the fly.
 rsync -a --exclude='*.gz' data/ public/data/
+# Publish promo banners so Buffer (SMM → Instagram/TikTok/Threads) can fetch them
+# by public URL: https://<worker>/best-sales-images/<date>/promo_*.png
+[ -d best-sales-images ] && rsync -a best-sales-images/ public/best-sales-images/
 # Never cache the Mini App shell, so a bumped ?v= asset URL is picked up on
 # reopen in the Telegram webview. Assets are served bypassing the Worker, so
 # this header must come from the asset layer's _headers file, not worker code.
