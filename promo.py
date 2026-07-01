@@ -168,6 +168,27 @@ def rounded(draw, box, rad, fill):
     draw.rounded_rectangle(box, radius=rad, fill=fill)
 
 
+TG_BLUE = (41, 169, 235)   # фірмовий блакитний Telegram
+def telegram_icon(size, blue=TG_BLUE):
+    """Іконка Telegram (блакитне коло + білий паперовий літачок), RGBA.
+    Малюємо у 4× і зменшуємо — щоб краї були згладжені (PIL не антиаліасить полігони)."""
+    ss = 4
+    S = size * ss
+    img = Image.new("RGBA", (S, S), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    r = S / 2
+    d.ellipse((0, 0, S - 1, S - 1), fill=blue + (255,))
+    P = lambda px, py: (r + px * r, r + py * r)       # координати від центру, одиниця = радіус
+    A = P(0.60, -0.40)    # ніс (верх-право)
+    B = P(-0.60, -0.06)   # хвіст (верх-ліво)
+    C = P(-0.10, 0.10)    # злам крила
+    D = P(0.04, 0.42)     # нижній кінчик хвостового пера
+    E = P(0.16, 0.18)     # черевце
+    d.polygon([A, B, C, D, E], fill=(255, 255, 255, 255))
+    d.polygon([A, E, C], fill=(214, 226, 234, 255))  # тінь згину
+    return img.resize((size, size), Image.LANCZOS)
+
+
 def wrap2(draw, text, font, max_w):
     """Назва максимум у 2 рядки; якщо хвіст не влазить — «…» на останньому."""
     words, lines, cur, i = text.split(), [], "", 0
@@ -304,11 +325,21 @@ def render_sheet(items, subtitle, out_path, *, hook_idx=None):
         tag = "ВЕЛИКА ПОКУПКА" if hook_idx is not None and i == hook_idx else None
         draw_card(canvas, draw, cx, cy, cw, CARD_H, it, tag=tag)
 
-    # футер
+    # футер: «Усі знижки щодня —  [tg] @sales_ua_bot» (іконка перед хендлом)
     fy = H - 96
+    cy = fy + 32
     rounded(draw, (M, fy, W - M, fy + 64), 32, INK)
-    draw.text((W / 2, fy + 32), "Усі знижки щодня — @sales_ua_bot",
-              font=_f("Arial Black.ttf", 32), fill="white", anchor="mm")
+    ff = _f("Arial Black.ttf", 32)
+    prefix, handle = "Усі знижки щодня —  ", "@sales_ua_bot"
+    ico = telegram_icon(42)
+    g = 8                                              # відступ між іконкою та хендлом
+    wp = draw.textlength(prefix, font=ff)
+    wh = draw.textlength(handle, font=ff)
+    total = wp + ico.width + g + wh
+    x = (W - total) / 2
+    draw.text((x, cy), prefix, font=ff, fill="white", anchor="lm")
+    canvas.paste(ico, (int(x + wp), int(cy - ico.height / 2)), ico)
+    draw.text((x + wp + ico.width + g, cy), handle, font=ff, fill="white", anchor="lm")
 
     canvas.save(out_path, "PNG")
     return out_path
