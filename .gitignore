@@ -16,6 +16,9 @@ __pycache__/
 # Generated static output (~1GB; rebuild via generate_static.py)
 data/
 
+# Generated promo banners (rebuild via promo.py) — kept local, posted manually
+best-sales-images/
+
 # Cloudflare Worker build/deploy artifacts
 public/
 node_modules/
