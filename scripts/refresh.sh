@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # Daily data refresh for the SLS Mini App, driven by launchd.
-#   scrape all chains -> regenerate static JSON -> deploy Worker
+#   scrape all chains -> promo banners+reel -> deploy Worker -> post to socials
+# promo.py runs BEFORE deploy so banners/reel ship in the same deploy; post.py
+# runs AFTER (public URLs live). promo/post are non-fatal — a bad promo day or
+# a posting hiccup must not fail the data refresh.
 #
 # Run by ~/Library/LaunchAgents/com.sls.refresh.plist. Logs to
 # ~/Library/Logs/sls-refresh.log; notifies on failure.
@@ -45,7 +48,15 @@ fi
 caffeinate -i -s bash -c '
   set -o pipefail
   ./.venv/bin/python run_scraper.py || { echo "SCRAPE FAILED (rc=$?)"; exit 10; }
+  # SMM: банери + 9:16 ролик + caption.json (перед деплоєм — публікуються тим
+  # самим deploy). Некритично: провал не має валити оновлення даних.
+  promo_ok=0
+  ./.venv/bin/python promo.py && promo_ok=1 || echo "PROMO FAILED — deploy проходить, постинг пропущено"
   ./deploy.sh                       || { echo "DEPLOY FAILED (rc=$?)"; exit 20; }
+  # Постинг у IG/TikTok/Threads (некритично: дані вже оновлені й задеплоєні).
+  if [ "$promo_ok" = 1 ]; then
+    ./.venv/bin/python post.py || echo "POST FAILED (rc=$?)"
+  fi
 '
 rc=$?
 
