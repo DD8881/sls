@@ -192,6 +192,11 @@ class MetroScraper(BaseScraper):
         image = bundle.get("imageUrlL") or bundle.get("imageUrl") or var.get("imageUrlL")
         promo = (spi.get("promotionLabels") or {}).get("promotion") or {}
 
+        # PDP route is /shop/pv/{articleNumber} (e.g. BTY-X392443); the SPA picks the
+        # default variant. articleNumber == rid minus the trailing 4-digit variantNumber.
+        article_number = (var.get("variantId") or {}).get("articleNumber")
+        url = f"{BASE}/shop/pv/{article_number}" if article_number else None
+
         return ScrapedProduct(
             external_id=rid,
             chain="metro",
@@ -201,7 +206,7 @@ class MetroScraper(BaseScraper):
             old_price=float(old_price) if old_price else None,
             discount_pct=discount_pct,
             image_url=image,
-            url=None,
+            url=url,
             unit=None,
             in_stock=True,
             promo_end_date=promo.get("end"),
