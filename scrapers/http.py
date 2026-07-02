@@ -13,6 +13,7 @@ from __future__ import annotations
 import os
 import threading
 import time
+from collections import deque
 from urllib.parse import urlparse
 
 import requests
@@ -34,35 +35,46 @@ from urllib3.util.retry import Retry
 MAX_CONCURRENCY = int(os.getenv("HTTP_MAX_CONCURRENCY", "48"))
 REQUEST_GATE = threading.BoundedSemaphore(MAX_CONCURRENCY)
 
-# Per-host circuit breaker. On a "bad host day" (an API dropping every connection
-# — e.g. fora returning BrokenPipe/timeout en masse) the retry layers otherwise
-# turn each store into minutes of futile re-tries, dragging a ~30-min run into
-# hours. After CB_CONSEC consecutive CONNECTION failures to a host the breaker
-# "opens": further requests to it fail INSTANTLY (no wait, no retry) for
-# CB_COOLDOWN seconds, so the chain finishes fast with partial data instead of
-# grinding. A single success closes it (self-healing). 5xx does NOT count — the
-# connection worked; only real connection errors (raised) do. Tunable via env.
-CB_CONSEC = int(os.getenv("CIRCUIT_FAIL_LIMIT", "15"))
+# Per-host circuit breaker (RATE-based). A bad host day comes in two shapes: a
+# dead host (every request fails) and a FLAPPING host — measured on fora:
+# ~3-5 BrokenPipe/min interspersed with slow successes. A consecutive-failure
+# breaker missed the flap (each success reset the counter) so fora ground on for
+# hours. Instead we count CONNECTION failures per host in a sliding CB_WINDOW;
+# once ≥ CB_FAILS land within it the host "opens" — requests fail INSTANTLY (no
+# wait, no retry) for CB_COOLDOWN. Successes are NOT counted (they must not mask a
+# flap); failures just age out of the window, so a recovered host closes itself.
+# After CB_MAX_TRIPS opens the host is abandoned for the rest of the run (stays
+# open) instead of being re-probed every cooldown. 5xx does NOT count — the
+# connection worked; only raised connection errors do. All tunable via env.
+CB_FAILS = int(os.getenv("CIRCUIT_FAIL_LIMIT", "12"))
+CB_WINDOW = int(os.getenv("CIRCUIT_WINDOW", "180"))
 CB_COOLDOWN = int(os.getenv("CIRCUIT_COOLDOWN", "90"))
+CB_MAX_TRIPS = int(os.getenv("CIRCUIT_MAX_TRIPS", "3"))
 _CB_LOCK = threading.Lock()
-_cb: dict = {}  # host -> [consecutive_conn_failures, open_until_monotonic]
+_cb_fails: dict = {}  # host -> deque[failure monotonic ts] within the window
+_cb_open: dict = {}   # host -> open-until (monotonic)
+_cb_trips: dict = {}  # host -> how many times it has opened this run
 
 
 def circuit_open(host: str) -> bool:
-    st = _cb.get(host)
-    return bool(st and time.monotonic() < st[1])
+    return time.monotonic() < _cb_open.get(host, 0.0)
 
 
 def note_result(host: str, ok: bool) -> None:
+    if ok:
+        return  # only connection FAILURES matter; a success must not reset a flap
+    now = time.monotonic()
     with _CB_LOCK:
-        st = _cb.setdefault(host, [0, 0.0])
-        if ok:
-            st[0] = 0
-            st[1] = 0.0  # a success closes the circuit immediately
-        else:
-            st[0] += 1
-            if st[0] >= CB_CONSEC:
-                st[1] = time.monotonic() + CB_COOLDOWN
+        dq = _cb_fails.setdefault(host, deque())
+        dq.append(now)
+        cutoff = now - CB_WINDOW
+        while dq and dq[0] < cutoff:
+            dq.popleft()
+        if len(dq) >= CB_FAILS:
+            _cb_trips[host] = _cb_trips.get(host, 0) + 1
+            cooldown = CB_COOLDOWN if _cb_trips[host] < CB_MAX_TRIPS else 10 ** 9
+            _cb_open[host] = now + cooldown
+            dq.clear()
 
 
 def _host(url: str) -> str:
