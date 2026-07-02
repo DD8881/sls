@@ -27,6 +27,17 @@ LOG="$HOME/Library/Logs/sls-refresh.log"
 exec >>"$LOG" 2>&1
 echo "===== $(date '+%F %T') start ====="
 
+# Single-run lock: a slow run must not overlap the next launchd trigger or a
+# wake-catch-up fire (that caused 3 overlapping scrapes in one afternoon, which
+# hammered fora until its API rate-limited us). If a live refresh is already
+# running, skip this trigger.
+LOCK="$HOME/Library/Logs/sls-refresh.lock"
+if [ -f "$LOCK" ] && kill -0 "$(cat "$LOCK" 2>/dev/null)" 2>/dev/null; then
+  echo "$(date '+%T') refresh already running (pid $(cat "$LOCK")) — skipping this trigger"
+  exit 0
+fi
+echo $$ > "$LOCK"
+
 # Disable lid-close sleep for the duration, then ALWAYS restore it — on success,
 # on failure, and on SIGINT/SIGTERM. Needs a NOPASSWD sudoers rule scoped to
 # exactly these two pmset calls (scripts/sls-pmset.sudoers).
@@ -35,7 +46,7 @@ restore_sleep() {
     && echo "$(date '+%T') disablesleep -> 0 (sleep restored)" \
     || echo "$(date '+%T') WARN: failed to restore disablesleep"
 }
-trap restore_sleep EXIT INT TERM
+trap 'restore_sleep; rm -f "$LOCK"' EXIT INT TERM
 
 if sudo /usr/bin/pmset -a disablesleep 1; then
   echo "$(date '+%T') disablesleep -> 1 (lid-close sleep off for the run)"

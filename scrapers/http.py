@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import os
 import threading
+import time
+from urllib.parse import urlparse
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -32,17 +34,59 @@ from urllib3.util.retry import Retry
 MAX_CONCURRENCY = int(os.getenv("HTTP_MAX_CONCURRENCY", "48"))
 REQUEST_GATE = threading.BoundedSemaphore(MAX_CONCURRENCY)
 
+# Per-host circuit breaker. On a "bad host day" (an API dropping every connection
+# — e.g. fora returning BrokenPipe/timeout en masse) the retry layers otherwise
+# turn each store into minutes of futile re-tries, dragging a ~30-min run into
+# hours. After CB_CONSEC consecutive CONNECTION failures to a host the breaker
+# "opens": further requests to it fail INSTANTLY (no wait, no retry) for
+# CB_COOLDOWN seconds, so the chain finishes fast with partial data instead of
+# grinding. A single success closes it (self-healing). 5xx does NOT count — the
+# connection worked; only real connection errors (raised) do. Tunable via env.
+CB_CONSEC = int(os.getenv("CIRCUIT_FAIL_LIMIT", "15"))
+CB_COOLDOWN = int(os.getenv("CIRCUIT_COOLDOWN", "90"))
+_CB_LOCK = threading.Lock()
+_cb: dict = {}  # host -> [consecutive_conn_failures, open_until_monotonic]
+
+
+def circuit_open(host: str) -> bool:
+    st = _cb.get(host)
+    return bool(st and time.monotonic() < st[1])
+
+
+def note_result(host: str, ok: bool) -> None:
+    with _CB_LOCK:
+        st = _cb.setdefault(host, [0, 0.0])
+        if ok:
+            st[0] = 0
+            st[1] = 0.0  # a success closes the circuit immediately
+        else:
+            st[0] += 1
+            if st[0] >= CB_CONSEC:
+                st[1] = time.monotonic() + CB_COOLDOWN
+
+
+def _host(url: str) -> str:
+    return urlparse(url).hostname or url
+
 
 class _GatedHTTPAdapter(HTTPAdapter):
-    """Holds a global permit for the duration of each request, so the total
-    in-flight requests across every session and thread never exceeds
-    MAX_CONCURRENCY. make_session() mounts this, so all requests-based scrapers
-    are gated transparently; scrapers with their own client wrap REQUEST_GATE
-    around their request call directly."""
+    """Gates every request on the global REQUEST_GATE (cap on concurrent sockets)
+    and on the per-host circuit breaker (fail fast when a host is down). Mounted
+    by make_session(), so all requests-based scrapers get both transparently;
+    scrapers with their own client wire circuit_open/note_result manually."""
 
-    def send(self, *args, **kwargs):
+    def send(self, request, *args, **kwargs):
+        host = _host(request.url)
+        if circuit_open(host):
+            raise requests.exceptions.ConnectionError(f"circuit breaker open for {host}")
         with REQUEST_GATE:
-            return super().send(*args, **kwargs)
+            try:
+                resp = super().send(request, *args, **kwargs)
+            except Exception:
+                note_result(host, False)  # connection-level failure
+                raise
+        note_result(host, True)  # got a response (even 5xx) → connection healthy
+        return resp
 
 
 def make_session(headers: dict | None = None, pool_maxsize: int = 10) -> requests.Session:

@@ -13,6 +13,7 @@ import logging
 import os
 import sqlite3
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import config
@@ -109,13 +110,16 @@ def scrape_store(scraper, store):
         return store, None
 
 
-def run_chain(scraper, conn, db_lock, args, fresh):
+def run_chain(scraper, conn, db_lock, args, fresh, deadline):
     """Scrape one chain end to end.
 
     Runs in its own thread (one per chain). All DB writes go through db_lock so
     the shared connection keeps a single writer at any instant; network I/O for
     every chain overlaps freely in between. ``fresh`` is True for a from-scratch
-    build (empty DB) — then per-store clears are unnecessary.
+    build (empty DB) — then per-store clears are unnecessary. ``deadline`` is a
+    monotonic() cap: past it the chain stops with partial data (a hard backstop
+    against a bad-host day dragging the run for hours; the circuit breaker in
+    scrapers/http.py normally makes such a chain fail fast well before this).
     """
     chain = scraper.chain_name()
 
@@ -154,6 +158,10 @@ def run_chain(scraper, conn, db_lock, args, fresh):
     with ThreadPoolExecutor(max_workers=workers, thread_name_prefix=f"{chain}-store") as pool:
         futures = {pool.submit(scrape_store, scraper, s): s for s in stores}
         for future in as_completed(futures):
+            if time.monotonic() > deadline:
+                log.warning("[%s] time budget exceeded — stopping with %d stores saved (partial)",
+                            chain, total_stores)
+                break
             store, products = future.result()
             if not products:
                 if products is None:
@@ -217,6 +225,11 @@ def main():
     parser.add_argument("--workers", type=int, default=None,
                         help="Override store workers for every chain (default: per-chain tuned values)")
     args = parser.parse_args()
+    # Hard wall-clock cap on the whole scrape (env SCRAPE_BUDGET_MIN, default 50).
+    # Past it, chains stop with partial data — a bad-host day can never drag the
+    # run into hours again. The per-host circuit breaker normally ends such a
+    # chain fast, so this rarely fires.
+    deadline = time.monotonic() + int(os.getenv("SCRAPE_BUDGET_MIN", "50")) * 60
 
     # Full run -> build a fresh DB off to the side and atomically swap it in.
     # Nothing reads the DB during a scrape, so this is faster (disposable file:
@@ -252,7 +265,7 @@ def main():
     # drops from sum(chain times) to ~max(chain time) with no extra load per host.
     failed_stores = []  # (scraper, store) pairs that errored — retried below
     with ThreadPoolExecutor(max_workers=max(len(scrapers), 1), thread_name_prefix="chain") as pool:
-        futures = {pool.submit(run_chain, sc, conn, db_lock, args, full_run): sc for sc in scrapers}
+        futures = {pool.submit(run_chain, sc, conn, db_lock, args, full_run, deadline): sc for sc in scrapers}
         for future in as_completed(futures):
             sc = futures[future]
             try:
@@ -265,7 +278,7 @@ def main():
     # chains finished). Low concurrency on purpose — they failed under burst, so a
     # calm pass recovers the transient ones. Runs before finalisation so recovered
     # data is indexed and swapped in.
-    if failed_stores:
+    if failed_stores and time.monotonic() < deadline:
         log.info("Retry pass: re-scraping %d store(s) that failed...", len(failed_stores))
         recovered = 0
         retry_caches: dict = {}
@@ -284,6 +297,9 @@ def main():
                 recovered += 1
                 log.info("[retry] %s %s: %d products recovered", store.chain, store.name, len(products))
         log.info("Retry pass: recovered %d of %d failed store(s)", recovered, len(failed_stores))
+    elif failed_stores:
+        log.warning("Retry pass skipped (time budget exceeded) — %d store(s) left for next run",
+                    len(failed_stores))
 
     # All scraping done — finalisation is single-threaded.
     log.info("Assigning unified categories...")

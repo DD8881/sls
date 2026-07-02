@@ -6,7 +6,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 
 from scrapers.base import BaseScraper, ScrapedCategory, ScrapedProduct, StoreInfo
-from scrapers.http import REQUEST_GATE
+from scrapers.http import REQUEST_GATE, circuit_open, note_result
 
 log = logging.getLogger(__name__)
 
@@ -114,6 +114,8 @@ class VarusScraper(BaseScraper):
     def _graphql(self, query: str) -> dict:
         session = self._get_session()
         for attempt in range(4):
+            if circuit_open("varus.ua"):
+                raise requests.exceptions.ConnectionError("circuit breaker open for varus.ua")
             try:
                 with REQUEST_GATE:
                     resp = session.post(
@@ -122,6 +124,7 @@ class VarusScraper(BaseScraper):
                         timeout=60,
                     )
             except requests.RequestException as e:
+                note_result("varus.ua", False)
                 if attempt < 3:
                     wait = 0.5 * (attempt + 2)
                     log.warning("[varus] connection error on attempt %d (%s), retrying in %.1fs...",
@@ -129,6 +132,7 @@ class VarusScraper(BaseScraper):
                     time.sleep(wait)
                     continue
                 raise
+            note_result("varus.ua", True)
             if resp.status_code in (429, 502, 503) and attempt < 3:
                 wait = 0.5 * (attempt + 2)
                 log.warning("[varus] %d on attempt %d, retrying in %.1fs...",
