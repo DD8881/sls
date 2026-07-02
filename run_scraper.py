@@ -225,11 +225,13 @@ def main():
     parser.add_argument("--workers", type=int, default=None,
                         help="Override store workers for every chain (default: per-chain tuned values)")
     args = parser.parse_args()
-    # Hard wall-clock cap on the whole scrape (env SCRAPE_BUDGET_MIN, default 50).
-    # Past it, chains stop with partial data — a bad-host day can never drag the
-    # run into hours again. The per-host circuit breaker normally ends such a
-    # chain fast, so this rarely fires.
-    deadline = time.monotonic() + int(os.getenv("SCRAPE_BUDGET_MIN", "50")) * 60
+    # Wall-clock BACKSTOP on the whole scrape (env SCRAPE_BUDGET_MIN, default 120).
+    # A healthy run finishes in ~30-35 min; a slow-but-progressing day (e.g. poor
+    # local internet) is allowed to run on and complete rather than be cut off
+    # with partial data. Past the cap chains stop with whatever they have — this
+    # only guards a truly stuck run, not normal slowness (the per-host circuit
+    # breaker already handles a genuinely dead host).
+    deadline = time.monotonic() + int(os.getenv("SCRAPE_BUDGET_MIN", "120")) * 60
 
     # Full run -> build a fresh DB off to the side and atomically swap it in.
     # Nothing reads the DB during a scrape, so this is faster (disposable file:
