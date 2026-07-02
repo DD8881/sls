@@ -155,12 +155,17 @@ def run_chain(scraper, conn, db_lock, args, fresh, deadline):
     # Per-chain {external_id: product_id}: promo products repeat across a chain's
     # branches, so this lets the writer skip re-upserting the same product per store.
     id_cache: dict = {}
-    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix=f"{chain}-store") as pool:
+    pool = ThreadPoolExecutor(max_workers=workers, thread_name_prefix=f"{chain}-store")
+    try:
         futures = {pool.submit(scrape_store, scraper, s): s for s in stores}
         for future in as_completed(futures):
             if time.monotonic() > deadline:
                 log.warning("[%s] time budget exceeded — stopping with %d stores saved (partial)",
                             chain, total_stores)
+                # Cancel not-yet-started stores so the pool actually STOPS. Without this,
+                # exiting the executor drains ALL submitted tasks (wait=True) — the deadline
+                # would halt SAVING but not SCRAPING (400+ queued stores keep running).
+                pool.shutdown(wait=False, cancel_futures=True)
                 break
             store, products = future.result()
             if not products:
@@ -177,6 +182,8 @@ def run_chain(scraper, conn, db_lock, args, fresh, deadline):
             total_products += len(products)
             total_stores += 1
             log.info("[%s] %s: %d products saved", chain, store.name, len(products))
+    finally:
+        pool.shutdown(wait=True)  # queued cancelled above on deadline; waits only for in-flight
 
     if failed:
         log.info("[%s] %d store(s) failed — queued for retry pass", chain, len(failed))
